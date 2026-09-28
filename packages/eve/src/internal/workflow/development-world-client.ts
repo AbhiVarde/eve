@@ -6,8 +6,6 @@ import type {
   World,
 } from "#compiled/@workflow/world/index.js";
 import { resolvePackageSourceFilePath } from "#internal/application/package.js";
-import { readFile } from "node:fs/promises";
-import { basename, join } from "node:path";
 
 import {
   decodeDevelopmentWorldJson,
@@ -20,7 +18,7 @@ import {
   withDevelopmentWorkflowGeneration,
 } from "#internal/workflow/development-generation-context.js";
 import { cancelExpiredDevelopmentRun } from "#internal/workflow/cancel-expired-development-run.js";
-import { isMissingDevelopmentRunError } from "#internal/workflow/is-inactive-development-run-error.js";
+import { isMissingWorkflowRunError } from "#internal/workflow/is-inactive-workflow-run-error.js";
 import {
   DEVELOPMENT_WORKER_APP_ROOT_ENV,
   DEVELOPMENT_WORKFLOW_DELIVERY_HEADER,
@@ -29,6 +27,8 @@ import {
   DEVELOPMENT_WORKFLOW_TRANSPORT_HEADER,
   DEVELOPMENT_WORKFLOW_WORLD_ROUTE,
   DEVELOPMENT_WORLD_OPERATIONS,
+  type DevelopmentGenerationAdmission,
+  type DevelopmentGenerationAvailabilityCall,
   type DevelopmentWorldCall,
   type DevelopmentWorldOperation,
 } from "#internal/workflow/development-world-protocol.js";
@@ -65,6 +65,19 @@ async function call<T>(
     method: "POST",
   });
   return decodeDevelopmentWorldValue(await response.text()) as T;
+}
+
+async function getGenerationAvailability(
+  generationId: string,
+): Promise<DevelopmentGenerationAdmission> {
+  const response = await fetchDevelopmentWorld(DEVELOPMENT_WORKFLOW_WORLD_ROUTE, {
+    body: encodeDevelopmentWorldValue({
+      operation: "eve.getGenerationAvailability",
+      generationId,
+    } satisfies DevelopmentGenerationAvailabilityCall),
+    method: "POST",
+  });
+  return decodeDevelopmentWorldValue(await response.text()) as DevelopmentGenerationAdmission;
 }
 
 /**
@@ -191,7 +204,12 @@ function createQueueHandler(
       const appRoot = readRequiredEnvironment(DEVELOPMENT_WORKER_APP_ROOT_ENV);
       const generationId = await resolveDeliveryGenerationId(message);
       if (generationId === undefined) return Response.json({ ok: true });
-      const runtimeAppRoot = await readGenerationRuntimeAppRoot(appRoot, generationId);
+      const availability = await getGenerationAvailability(generationId);
+      if (availability.kind === "missing")
+        throw new MissingDevelopmentGenerationError(generationId);
+      if (availability.kind === "ineligible" || availability.kind === "dormant")
+        return Response.json({ ok: true });
+      const runtimeAppRoot = availability.runtimeAppRoot;
       const result = await withDevelopmentWorkflowGeneration(
         {
           generationId,
@@ -261,7 +279,7 @@ async function resolveDeliveryGenerationId(message: unknown): Promise<string | u
     ]);
     return run.deploymentId;
   } catch (error) {
-    if (!isMissingDevelopmentRunError(error)) throw error;
+    if (!isMissingWorkflowRunError(error)) throw error;
     return undefined;
   }
 }
@@ -273,53 +291,6 @@ function resolveDeliveryRunId(message: unknown): string | undefined {
     : typeof message.workflowRunId === "string"
       ? message.workflowRunId
       : undefined;
-}
-
-async function readGenerationRuntimeAppRoot(
-  appRoot: string,
-  generationId: string,
-): Promise<string> {
-  if (
-    generationId.length === 0 ||
-    generationId === "." ||
-    generationId === ".." ||
-    basename(generationId) !== generationId
-  ) {
-    throw new Error(`Workflow run references invalid development generation "${generationId}".`);
-  }
-  const metadataPath = join(
-    appRoot,
-    ".eve",
-    "dev-runtime",
-    "snapshots",
-    generationId,
-    "generation.json",
-  );
-  let source: string;
-  try {
-    source = await readFile(metadataPath, "utf8");
-  } catch (error) {
-    if (isFileNotFoundError(error)) {
-      throw new MissingDevelopmentGenerationError(generationId, error);
-    }
-    throw error;
-  }
-  let metadata: unknown;
-  try {
-    metadata = JSON.parse(source);
-  } catch (error) {
-    throw new Error(`Development generation "${generationId}" has invalid metadata.`, {
-      cause: error,
-    });
-  }
-  if (!isRecord(metadata) || typeof metadata.runtimeAppRoot !== "string") {
-    throw new Error(`Development generation "${generationId}" has invalid metadata.`);
-  }
-  return metadata.runtimeAppRoot;
-}
-
-function isFileNotFoundError(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

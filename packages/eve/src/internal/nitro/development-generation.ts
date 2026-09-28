@@ -21,6 +21,7 @@ export interface DevelopmentGeneration extends DevelopmentRuntimeArtifactsSnapsh
 
 interface DevelopmentGenerationPruneState {
   requested: boolean;
+  reconciliationPending: boolean;
   running: Promise<void> | undefined;
   onRuntimePruned?: () => Promise<void>;
 }
@@ -133,6 +134,7 @@ function requestDevelopmentGenerationPrune(
 ): void {
   const state: DevelopmentGenerationPruneState = developmentGenerationPruneStates.get(appRoot) ?? {
     requested: false,
+    reconciliationPending: false,
     running: undefined,
   };
   developmentGenerationPruneStates.set(appRoot, state);
@@ -151,9 +153,20 @@ function startDevelopmentGenerationPruning(
     while (state.requested) {
       state.requested = false;
       const onRuntimePruned = state.onRuntimePruned;
-      await pruneDevelopmentRuntimeArtifactsSnapshots({ appRoot });
+      let removedSnapshots: boolean;
       try {
-        await onRuntimePruned?.();
+        removedSnapshots = await pruneDevelopmentRuntimeArtifactsSnapshots({ appRoot });
+      } catch (error) {
+        // A failed prune may already have removed some snapshots.
+        state.reconciliationPending ||= onRuntimePruned !== undefined;
+        throw error;
+      }
+      state.reconciliationPending ||= removedSnapshots && onRuntimePruned !== undefined;
+      try {
+        if (state.reconciliationPending && onRuntimePruned !== undefined) {
+          await onRuntimePruned();
+          state.reconciliationPending = false;
+        }
       } catch (error) {
         console.warn(`[eve:dev] failed to reconcile expired Workflow runs: ${String(error)}`);
       }
@@ -166,8 +179,11 @@ function startDevelopmentGenerationPruning(
       state.running = undefined;
       if (state.requested) {
         startDevelopmentGenerationPruning(appRoot, state);
-      } else {
+      } else if (!state.reconciliationPending) {
         developmentGenerationPruneStates.delete(appRoot);
+      } else {
+        // Retry failed cleanup on the next activation, even if its prune is a no-op.
+        state.onRuntimePruned = undefined;
       }
     });
 }

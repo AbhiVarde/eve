@@ -1,5 +1,8 @@
-import { existsSync } from "node:fs";
-import { basename, join } from "node:path";
+import {
+  readDevelopmentGenerationAvailability,
+  type DevelopmentGenerationAvailability,
+} from "#internal/workflow/development-runtime-compatibility.js";
+import { listDevelopmentGenerationIds } from "#internal/nitro/dev-runtime-generation-metadata.js";
 
 import { cancelExpiredDevelopmentRun } from "#internal/workflow/cancel-expired-development-run.js";
 import type { ValidQueueName, World } from "#compiled/@workflow/world/index.js";
@@ -22,7 +25,8 @@ import {
   DEVELOPMENT_WORKFLOW_TRANSPORT_HEADER,
   DEVELOPMENT_WORKFLOW_WORLD_ROUTE,
   DEVELOPMENT_WORLD_OPERATIONS,
-  type DevelopmentWorldCall,
+  type DevelopmentGenerationAdmission,
+  type DevelopmentWorldRequest,
 } from "#internal/workflow/development-world-protocol.js";
 
 /**
@@ -52,6 +56,7 @@ export function createParentDevelopmentWorkflowWorld(input: {
   readonly agentName: string;
   readonly appRoot: string;
   readonly resolveActiveGenerationId: () => string;
+  readonly resume?: boolean;
   readonly transportSecret: string;
 }): ParentDevelopmentWorkflowWorld {
   return new LocalParentDevelopmentWorkflowWorld(input);
@@ -63,6 +68,13 @@ class LocalParentDevelopmentWorkflowWorld implements ParentDevelopmentWorkflowWo
   readonly #resolveActiveGenerationId: () => string;
   readonly #transportSecret: string;
   readonly #world: World;
+  readonly #resume: boolean;
+  // Owned by the host, not a worker: rebuilds preserve the startup admission decision.
+  readonly #unrecoveredGenerations = new Map<
+    string,
+    | Extract<DevelopmentGenerationAvailability, { kind: "ineligible" }>
+    | { readonly kind: "dormant" }
+  >();
   #closed = false;
   #started = false;
   #reconciliation: Promise<void> = Promise.resolve();
@@ -71,11 +83,13 @@ class LocalParentDevelopmentWorkflowWorld implements ParentDevelopmentWorkflowWo
     readonly agentName: string;
     readonly appRoot: string;
     readonly resolveActiveGenerationId: () => string;
+    readonly resume?: boolean;
     readonly transportSecret: string;
   }) {
     if (input.transportSecret.length < 16) {
       throw new Error("Development Workflow transport secret is too short to be trusted.");
     }
+    this.#resume = input.resume === true;
     this.#agentName = input.agentName;
     this.#appRoot = input.appRoot;
     this.#resolveActiveGenerationId = input.resolveActiveGenerationId;
@@ -91,14 +105,40 @@ class LocalParentDevelopmentWorkflowWorld implements ParentDevelopmentWorkflowWo
     if (this.#started) {
       return;
     }
+    // Queue redelivery starts with the World. Decide admission before it can wake retained runs.
+    const recoveryGenerationId = this.#resolveActiveGenerationId();
+    this.#unrecoveredGenerations.clear();
+    for (const generationId of await listDevelopmentGenerationIds(this.#appRoot)) {
+      if (generationId === recoveryGenerationId) continue;
+      if (!this.#resume) {
+        this.#unrecoveredGenerations.set(generationId, { kind: "dormant" });
+        continue;
+      }
+      const availability = await readDevelopmentGenerationAvailability(this.#appRoot, generationId);
+      if (availability.kind === "ineligible") {
+        this.#unrecoveredGenerations.set(generationId, availability);
+      }
+    }
     await this.#world.start?.();
     this.#started = true;
     try {
       await this.#reconcileExpiredRuns();
+      if (!this.#resume) return;
+      const skippedGenerations = new Set<string>();
       await reenqueueActiveDevelopmentRuns({
         enqueue: this.#queue.bind(this),
         prefix: deriveEveWorkflowQueuePrefix(this.#agentName),
         world: this.#world,
+        canRecover: async (generationId) => {
+          const availability = await this.#generationAvailability(generationId);
+          if (availability.kind === "ineligible" && !skippedGenerations.has(generationId)) {
+            skippedGenerations.add(generationId);
+            console.warn(
+              `[eve:dev] Skipping retained Workflow generation "${generationId}": ${availability.reason}`,
+            );
+          }
+          return availability.kind === "ready";
+        },
       });
     } catch (error) {
       this.#started = false;
@@ -167,7 +207,11 @@ class LocalParentDevelopmentWorkflowWorld implements ParentDevelopmentWorkflowWo
           );
         }
         for (const run of page.data) {
-          if (!this.#generationExists(run.deploymentId)) runIds.push(run.runId);
+          const availability = await readDevelopmentGenerationAvailability(
+            this.#appRoot,
+            run.deploymentId,
+          );
+          if (availability.kind === "missing") runIds.push(run.runId);
         }
         cursor = page.hasMore ? (page.cursor ?? undefined) : undefined;
       } while (cursor !== undefined);
@@ -180,7 +224,7 @@ class LocalParentDevelopmentWorkflowWorld implements ParentDevelopmentWorkflowWo
       return Response.json({ error: "Workflow World request is not trusted." }, { status: 401 });
     }
     try {
-      const call = decodeDevelopmentWorldValue(await request.text()) as DevelopmentWorldCall;
+      const call = decodeDevelopmentWorldValue(await request.text());
       const result = await this.#call(call);
       return new Response(encodeDevelopmentWorldValue(result));
     } catch (error) {
@@ -225,9 +269,12 @@ class LocalParentDevelopmentWorkflowWorld implements ParentDevelopmentWorkflowWo
     });
   }
 
-  async #call(call: DevelopmentWorldCall): Promise<unknown> {
-    if (!isDevelopmentWorldCall(call)) {
+  async #call(call: unknown): Promise<unknown> {
+    if (!isDevelopmentWorldRequest(call)) {
       throw new Error("Development Workflow World call is malformed.");
+    }
+    if (call.operation === "eve.getGenerationAvailability") {
+      return await this.#generationAvailability(call.generationId);
     }
     const args = [...call.arguments];
     // Deployment identity and enqueueing carry eve semantics (generation
@@ -238,6 +285,23 @@ class LocalParentDevelopmentWorkflowWorld implements ParentDevelopmentWorkflowWo
     }
     if (call.operation === "queue") {
       return await this.#queue(...(args as Parameters<World["queue"]>));
+    }
+    if (call.operation === "hooks.getByToken" || call.operation === "hooks.get") {
+      if (!this.#started) throw new Error("Local Workflow World is still starting.");
+      const hook =
+        call.operation === "hooks.getByToken"
+          ? await this.#world.hooks.getByToken(
+              ...(args as Parameters<World["hooks"]["getByToken"]>),
+            )
+          : await this.#world.hooks.get(...(args as Parameters<World["hooks"]["get"]>));
+      const run = await this.#world.runs.get(hook.runId, { resolveData: "none" });
+      const availability = await this.#generationAvailability(run.deploymentId);
+      if (availability.kind === "dormant" || availability.kind === "ineligible") {
+        throw new Error(
+          "Local Workflow run was not resumed. Start a new conversation, or restart eve dev with --resume to attempt recovery.",
+        );
+      }
+      return hook;
     }
     if (call.operation === "streams.writeMulti" && this.#world.streams.writeMulti === undefined) {
       for (const chunk of args[2] as readonly (string | Uint8Array)[]) {
@@ -264,33 +328,23 @@ class LocalParentDevelopmentWorkflowWorld implements ParentDevelopmentWorkflowWo
     return header !== null && timingSafeEqualStrings(header, this.#transportSecret);
   }
 
-  #generationExists(generationId: string): boolean {
-    if (!isValidGenerationId(generationId)) {
-      return false;
-    }
-    return existsSync(
-      join(this.#appRoot, ".eve", "dev-runtime", "snapshots", generationId, "generation.json"),
-    );
+  async #generationAvailability(generationId: string): Promise<DevelopmentGenerationAdmission> {
+    const availability = await readDevelopmentGenerationAvailability(this.#appRoot, generationId);
+    // Pruning still expires a run, even when startup refused its recovery.
+    if (availability.kind !== "ready") return availability;
+    return this.#unrecoveredGenerations.get(generationId) ?? availability;
   }
-}
-
-function isValidGenerationId(generationId: string): boolean {
-  return (
-    generationId.length > 0 &&
-    generationId !== "." &&
-    generationId !== ".." &&
-    basename(generationId) === generationId
-  );
 }
 
 const DEVELOPMENT_WORLD_OPERATION_SET: ReadonlySet<string> = new Set(DEVELOPMENT_WORLD_OPERATIONS);
 
-function isDevelopmentWorldCall(value: unknown): value is DevelopmentWorldCall {
+function isDevelopmentWorldRequest(value: unknown): value is DevelopmentWorldRequest {
   return (
     isObject(value) &&
     typeof value.operation === "string" &&
-    DEVELOPMENT_WORLD_OPERATION_SET.has(value.operation) &&
-    Array.isArray(value.arguments)
+    (value.operation === "eve.getGenerationAvailability"
+      ? typeof value.generationId === "string"
+      : DEVELOPMENT_WORLD_OPERATION_SET.has(value.operation) && Array.isArray(value.arguments))
   );
 }
 
@@ -300,6 +354,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 async function reenqueueActiveDevelopmentRuns(input: {
   readonly enqueue: World["queue"];
+  readonly canRecover: (generationId: string) => Promise<boolean>;
   readonly prefix: string;
   readonly world: World;
 }): Promise<void> {
@@ -321,6 +376,7 @@ async function reenqueueActiveDevelopmentRuns(input: {
         );
       }
       for (const run of page.data) {
+        if (!(await input.canRecover(run.deploymentId))) continue;
         await input.enqueue(`${input.prefix}${run.workflowName}` as ValidQueueName, {
           runId: run.runId,
         });

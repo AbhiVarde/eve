@@ -68,9 +68,14 @@ export interface ApprovalResponseAuth {
   requireAuth(provider: ToolAuthProvider, options?: ToolAuthOptions): never;
 }
 
-/** Submitted decision passed to an approval response policy. */
+/** Submitted response passed to an approval response policy. */
 export interface ApprovalResponse {
-  readonly decision: "approve";
+  readonly decision: "approve" | "cancel";
+  /**
+   * Who submitted the response: the authenticated principal, including its
+   * `principalId`, `principalType`, `authenticator`, and `attributes`.
+   */
+  readonly principal: SessionAuthContext;
 }
 
 /** Context passed to an approval response policy. */
@@ -78,16 +83,18 @@ export interface ApprovalResponseContext<TInput = Record<string, unknown>> {
   readonly auth: ApprovalResponseAuth;
   readonly request: ApprovalRequest<TInput>;
   readonly response: ApprovalResponse;
-  readonly responder: SessionAuthContext;
   readonly session: ApprovalResponseSession;
 }
 
-/** Response policy decision. Rejection keeps the shared request pending. */
+/**
+ * Response policy decision. Rejection keeps the shared request pending, so
+ * another responder can still settle it.
+ */
 export type ApprovalResponseDecision =
   | { readonly status: "allowed" }
   | { readonly reason: string; readonly status: "rejected" };
 
-/** Decides whether an authenticated responder may approve one request. */
+/** Decides whether an authenticated responder may approve or cancel one request. */
 export type ApprovalResponsePolicy<TInput = Record<string, unknown>> = (
   ctx: ApprovalResponseContext<TInput>,
 ) => ApprovalResponseDecision | Promise<ApprovalResponseDecision>;

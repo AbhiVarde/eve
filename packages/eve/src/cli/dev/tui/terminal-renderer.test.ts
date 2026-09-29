@@ -1778,20 +1778,69 @@ describe("TerminalRenderer (inline scrollback)", () => {
     renderer.shutdown();
   });
 
-  it("retires the placeholder after the first user message", async () => {
+  it("retires a local cue after the first user message, including after a header refresh", async () => {
     const { screen, input, renderer } = makeRenderer();
+    const info = createTestAgentInfoResult();
+    const header = {
+      name: "Orders",
+      serverUrl: "http://localhost:3000",
+      localDevelopment: true,
+      info: {
+        ...info,
+        instructions: {
+          dynamic: [],
+          static: [
+            {
+              ...info.agent.config,
+              name: "instructions",
+              role: "system" as const,
+              content: "Help with orders.",
+            },
+          ],
+        },
+        subagents: {
+          total: 1,
+          local: [
+            {
+              ...info.agent.config,
+              owner: {
+                kind: "extension" as const,
+                namespace: "self-modification",
+                packageName: "eve",
+              },
+              name: "self-modification__agent",
+              entryPath: "subagents/agent/agent.ts",
+              rootPath: "/eve/self-modification",
+              nodeId: "self-modification__agent",
+              parentNodeId: "__root__",
+              summary: {
+                channels: 0,
+                connections: 0,
+                hooks: 0,
+                instructions: 1,
+                memories: 0,
+                schedules: 0,
+                skills: 0,
+                tools: 1,
+              },
+            },
+          ],
+        },
+      },
+    };
+    renderer.renderAgentHeader(header);
 
     const first = renderer.readPrompt();
-    expect(screen.snapshot()).toContain("❯ Send a message…");
+    expect(screen.snapshot()).toContain("❯ Send a message, or ask me to add a channel…");
     input.type("hello");
     input.enter();
     expect(await first).toBe("hello");
+    await renderer.renderStream(streamOf([]), { continueSession: true, submittedPrompt: "hello" });
 
-    // Once the user has spoken, the empty prompt keeps the default-color `❯` but
-    // drops the invitation text; typing still colors the active `❯`.
+    renderer.renderAgentHeader(header);
     const second = renderer.readPrompt();
     expect(screen.snapshot()).toContain("❯");
-    expect(screen.snapshot()).not.toContain("Send a message…");
+    expect(screen.snapshot()).not.toContain("ask me to add a channel");
     input.type("again");
     expect(screen.snapshot()).toContain("❯ again");
     input.ctrlC();
@@ -1799,6 +1848,24 @@ describe("TerminalRenderer (inline scrollback)", () => {
     input.ctrlC();
     await expect(second).rejects.toThrow();
     renderer.shutdown();
+
+    const queued = makeRenderer();
+    queued.renderer.beginStartupDraft({ title: "Orders" });
+    queued.input.type("hello from startup");
+    queued.input.enter();
+    const startup = queued.renderer.finishStartupDraft();
+    expect(startup.queuedPrompt).toBe("hello from startup");
+    queued.renderer.renderAgentHeader(header);
+    await queued.renderer.renderStream(streamOf([]), {
+      continueSession: true,
+      submittedPrompt: startup.queuedPrompt,
+    });
+    const afterQueuedMessage = queued.renderer.readPrompt();
+    expect(queued.screen.snapshot()).not.toContain("ask me to add a channel");
+    queued.input.ctrlC();
+    queued.input.ctrlC();
+    await expect(afterQueuedMessage).rejects.toThrow();
+    queued.renderer.shutdown();
   });
 
   it("keeps collapsed reasoning out of the transcript behind the turn bar", async () => {

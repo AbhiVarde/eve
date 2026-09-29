@@ -9,6 +9,12 @@ import {
   respondAsNotebookKeeper,
   respondAsNotebookParent,
 } from "./lib/notebook.js";
+import {
+  isSurveyDirective,
+  isSurveyToolDirective,
+  respondAsSurveyParent,
+  respondAsSurveyToolParent,
+} from "./lib/survey.js";
 
 if (process.env.EVE_E2E_MODEL === "mock") {
   process.env.EVE_MOCK_AUTHORED_MODELS = "1";
@@ -88,6 +94,11 @@ const workspaceDispatcher = mockModel({
   },
 });
 const notebookParent = mockModel({ modelId: "notebook-parent", respond: respondAsNotebookParent });
+const surveyParent = mockModel({ modelId: "survey-parent", respond: respondAsSurveyParent });
+const surveyToolParent = mockModel({
+  modelId: "survey-tool-parent",
+  respond: respondAsSurveyToolParent,
+});
 // The remote keeper is a root session of this deployment, reached through remote-loopback.
 const notebookKeeper = mockModel({ modelId: "notebook-keeper", respond: respondAsNotebookKeeper });
 /** Reads the id of a tool's task from the latest framework-injected `[Tasks]` note. */
@@ -135,6 +146,12 @@ export default defineAgent({
         }
         if (messages.some(isNotebookDirective)) {
           return { model: notebookParent, modelContextWindowTokens: 1_000_000 };
+        }
+        if (messages.some(isSurveyDirective)) {
+          return { model: surveyParent, modelContextWindowTokens: 1_000_000 };
+        }
+        if (messages.some(isSurveyToolDirective)) {
+          return { model: surveyToolParent, modelContextWindowTokens: 1_000_000 };
         }
         return { model: defaultModel, modelContextWindowTokens };
       },

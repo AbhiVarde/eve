@@ -15,12 +15,13 @@ import { clearPendingSessionLimitPrompt } from "#harness/input-requests.js";
 import { getHarnessEmissionState, setHarnessEmissionState } from "#harness/emission.js";
 import { clearAllProxyInputRequests } from "#harness/proxy-input-requests.js";
 import { removeBlockingWorkflowToolRuns } from "#harness/workflow-tool-runs.js";
-import { getTurnUsageState, toUsage } from "#harness/turn-tag-state.js";
+import { getTurnUsageState, takeSessionUsageDelta } from "#harness/turn-tag-state.js";
 import type { TokenUsage } from "#shared/token-usage.js";
 
 export interface CancelledTurnSettleResult {
   readonly serializedContext: Record<string, unknown>;
   readonly sessionState: DurableSessionState;
+  /** What the session spent since its caller's last report, when asked to report it. */
   readonly usage?: TokenUsage;
 }
 
@@ -31,6 +32,11 @@ export interface CancelledTurnSettleResult {
  * cancel hook, so a queued cancel wake cannot re-dispatch it.
  */
 export async function settleCancelledTurnStep(input: {
+  /**
+   * Whether a caller receives the turn's usage. Only then is it marked
+   * reported; otherwise the next settled turn reports it.
+   */
+  readonly reportUsage: boolean;
   readonly sessionWritable: WritableStream<Uint8Array>;
   readonly serializedContext: Record<string, unknown>;
   readonly sessionState: DurableSessionState;
@@ -71,11 +77,16 @@ export async function settleCancelledTurnStep(input: {
       emissionState,
     ),
   );
-  const totals = getTurnUsageState(session.state)?.session;
-
-  const base = {
-    serializedContext: serializeContext(ctx),
-    sessionState: createDurableSessionState({ session: cancelledSession }),
+  const base = { serializedContext: serializeContext(ctx) };
+  if (!input.reportUsage || getTurnUsageState(session.state) === undefined) {
+    return { ...base, sessionState: createDurableSessionState({ session: cancelledSession }) };
+  }
+  // Reported like a settled turn, as usage since the last report, so the
+  // caller counts each turn once whether it settled or was cancelled.
+  const reported = takeSessionUsageDelta(cancelledSession);
+  return {
+    ...base,
+    sessionState: createDurableSessionState({ session: reported.session }),
+    usage: reported.delta,
   };
-  return totals === undefined ? base : { ...base, usage: toUsage(totals) };
 }

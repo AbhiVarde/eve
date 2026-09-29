@@ -58,7 +58,7 @@ export const ROOT_COMPILED_AGENT_NODE_ID = "__root__";
 /**
  * Current compiled manifest schema version.
  */
-export const COMPILED_AGENT_MANIFEST_VERSION = 53;
+export const COMPILED_AGENT_MANIFEST_VERSION = 54;
 
 /**
  * Active compiled channel entry — backed by an authored `Channel` module.
@@ -372,6 +372,7 @@ const filesystemModuleBackingSchema = z
   .object({
     externalDependencies: z.array(z.string()).readonly(),
     extensionScope: z.object({ namespace: z.string(), sourceRoot: z.string() }).strict().optional(),
+    mountId: z.string().optional(),
     kind: z.literal("filesystem"),
     sourcePath: z.string(),
   })
@@ -381,6 +382,7 @@ const programmaticModuleBackingSchema = z
   .object({
     dependencies: z.record(z.string(), z.string()).readonly().optional(),
     kind: z.literal("programmatic"),
+    mountId: z.string().optional(),
     moduleId: z.string(),
     parameters: jsonObjectSchema.optional(),
     registryId: z.string(),
@@ -939,10 +941,20 @@ const compiledExtensionMountSchema: z.ZodType<CompiledExtensionMount> = z
     externalDependencies: z.array(z.string()).readonly(),
     namespace: z.string(),
     packageName: z.string(),
+    specifier: z.string(),
     mountId: mountIdSchema,
     packageNamespace: z.string(),
     sourceRoot: z.string(),
     mountSourceId: z.string(),
+    mountSourcePath: z.string(),
+    programmaticImport: z
+      .object({
+        specifier: z.string(),
+        entryPath: z.string(),
+        config: z.record(z.string(), z.unknown()),
+      })
+      .strict()
+      .optional(),
     mountLogicalPath: z.string(),
   })
   .strict();
@@ -1027,29 +1039,29 @@ const compiledSubagentNodeSchema: z.ZodType<CompiledSubagentNode> = z.union([
 /**
  * One mounted extension recorded on a compiled agent manifest. The runtime
  * evaluates {@link mountLogicalPath} at module-map load so the mount's factory
- * call binds the extension's config before any tool runs.
+ * call binds the extension's config on its instance handle before any tool runs.
  */
 export interface CompiledExtensionMount {
+  readonly programmaticImport?: {
+    readonly specifier: string;
+    readonly entryPath: string;
+    readonly config: Record<string, unknown>;
+  };
   /** Runtime packages this extension requires the consuming application to externalize. */
   readonly externalDependencies: readonly string[];
   /** Mount-derived namespace that prefixes the extension's tool/skill names. */
   readonly namespace: string;
   readonly packageName: string;
+  /** Package export imported by the mount declaration. */
+  readonly specifier: string;
   /** Canonical path of this mount in the root agent tree. */
   readonly mountId: string;
-  /**
-   * Package-derived namespace that scopes durable state keys and config binding.
-   * Unlike the logical consumer path in {@link mountId}, this stays stable when
-   * the mount file is renamed, so persisted state is not orphaned.
-   */
+  /** Package-derived namespace for durable extension state keys. */
   readonly packageNamespace: string;
-  /**
-   * Absolute path to the extension's source root on disk. The extension-scope
-   * bundler plugin treats any module under this root as extension-owned and
-   * rewrites its `eve/context`/`eve/extension` imports to bake in the namespace.
-   */
+  /** Absolute path to the extension's distributed source root. */
   readonly sourceRoot: string;
   readonly mountSourceId: string;
+  readonly mountSourcePath: string;
   readonly mountLogicalPath: string;
 }
 

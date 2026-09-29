@@ -1,3 +1,9 @@
+import { randomUUID } from "node:crypto";
+import {
+  createMountEvaluationContext,
+  type ExtensionCompileMount,
+} from "#compiler/extension-mount-evaluation.js";
+
 import type { AgentSourceManifest } from "#discover/manifest.js";
 import {
   type CompiledAgentDefinition,
@@ -26,10 +32,7 @@ import {
   ROOT_COMPILED_AGENT_NODE_ID,
 } from "#compiler/manifest.js";
 import { createCompiledRuntimeModelCatalogLoader } from "#compiler/model-catalog.js";
-import {
-  markConfigRuntimeEntries,
-  NodeModuleEvaluationContext,
-} from "#compiler/module-lifecycle.js";
+import { markConfigRuntimeEntries } from "#compiler/module-lifecycle.js";
 import { compileAgentConfig } from "#compiler/normalize-agent-config.js";
 import { compileChannelDefinition } from "#compiler/normalize-channel.js";
 import { compileConnectionDefinition } from "#compiler/normalize-connection.js";
@@ -39,10 +42,7 @@ import {
   assertFrameworkToolPolicy,
   canDisableToolWithoutSelectedSource,
 } from "#compiler/default-tool-policy.js";
-import {
-  loadModuleBackedDefinition,
-  type ManifestCompileContext,
-} from "#compiler/normalize-helpers.js";
+import type { ManifestCompileContext } from "#compiler/normalize-helpers.js";
 import { resolveWorkspaceSubagentDefinition } from "#compiler/resolve-workspace-subagent.js";
 import { workspaceSubagentName } from "#public/definitions/workspace-agent.js";
 import { compileHookEntry } from "#compiler/normalize-hook.js";
@@ -62,7 +62,6 @@ import {
   type ComposedNodeSourceGraph,
   type FinalizedNodeSourceState,
   type PhaseOneNodeSourceState,
-  type SelectedNodeConfig,
 } from "#compiler/node-source-state.js";
 import {
   assertApplicationOverlayCanApplyToAllNodes,
@@ -74,6 +73,7 @@ import {
   createCompiledRemoteAgent,
   expectSubagentDescription,
   mergeExternalDependencies,
+  loadSelectedNodeConfig,
   collectSelectedSourceIds,
   withDiagnosticsSummary,
   withExtensionNamespace,
@@ -154,6 +154,8 @@ class AgentGraphCompiler {
   private readonly context: ManifestCompileContext;
   private readonly registries: readonly AgentSourceRegistry[];
   private readonly diagnostics: CompilerDiagnostic[];
+  private readonly mounts = new Map<string, ExtensionCompileMount>();
+  private readonly evaluationId = randomUUID();
 
   constructor(
     context: ManifestCompileContext,
@@ -224,6 +226,7 @@ class AgentGraphCompiler {
       const nodeId = createCompiledSubagentNodeId(input.nodeId, source.sourceId);
       const childInput: NodeCompileInput = {
         extensionScope: projected.extensionScope ?? input.extensionScope,
+        mountId: projected.mountId,
         inheritedExternalDependencies,
         isRoot: false,
         layer: projected.candidate.layer,
@@ -359,6 +362,7 @@ class AgentGraphCompiler {
     const projected = projectAgentSources({
       externalDependencies,
       extensionScope: input.extensionScope,
+      mountId: input.mountId,
       layer: input.layer,
       manifest: input.manifest,
       nodeId: input.nodeId,
@@ -437,7 +441,12 @@ class AgentGraphCompiler {
     externalDependencies: readonly string[],
   ): Promise<PhaseOneNodeSourceState> {
     const graph = this.composeNodeSources(input, externalDependencies);
-    const evaluation = new NodeModuleEvaluationContext(this.registries);
+    const evaluation = createMountEvaluationContext({
+      node: input,
+      registries: this.registries,
+      mounts: this.mounts,
+      evaluationId: this.evaluationId,
+    });
     evaluation.setBindings(
       Object.fromEntries(
         [...graph.composed.selected.values()]
@@ -448,34 +457,7 @@ class AgentGraphCompiler {
     return {
       evaluation,
       graph,
-      selectedConfig: await this.loadSelectedConfig(graph, evaluation),
-    };
-  }
-
-  private async loadSelectedConfig(
-    state: ComposedNodeSourceGraph,
-    evaluation: NodeModuleEvaluationContext,
-  ): Promise<SelectedNodeConfig> {
-    const candidate = state.composed.selected.get("agent");
-    if (candidate === undefined || !isAgentModuleCandidate(candidate)) {
-      throw new Error("Every local agent node requires a selected module-backed agent.ts source.");
-    }
-    const binding = createAgentModuleBinding(candidate);
-    const projected = state.sourcesBySourceId.get(candidate.sourceId);
-    if (projected?.source.sourceKind !== "module") {
-      throw new Error(`Selected agent config source "${candidate.sourceId}" was not projected.`);
-    }
-    const source = projected.source;
-    return {
-      binding,
-      candidate,
-      definition: await loadModuleBackedDefinition({
-        binding,
-        kind: "agent config",
-        loadNamespace: evaluation.loadNamespace,
-        source,
-      }),
-      source,
+      selectedConfig: await loadSelectedNodeConfig(graph, evaluation),
     };
   }
 

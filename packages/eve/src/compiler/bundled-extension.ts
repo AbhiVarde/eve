@@ -1,4 +1,3 @@
-import { packageStateNamespace } from "#discover/extensions.js";
 import {
   defineProgrammaticExtensionMountDeclaration,
   type ProgrammaticAgentSource,
@@ -7,6 +6,9 @@ import { resolveInstalledPackageInfo, resolvePackageRoot } from "#internal/appli
 
 /** The small descriptor used for extensions shipped inside eve. */
 export interface BundledExtensionDescriptor {
+  readonly entryPath: string;
+  readonly importSpecifier: string;
+  readonly config: Record<string, unknown>;
   readonly loadMount: () => Promise<unknown>;
   readonly namespace: string;
   readonly sourceDirectory: string;
@@ -14,6 +16,9 @@ export interface BundledExtensionDescriptor {
 
 export interface BundledExtensionMount {
   readonly declaration: ProgrammaticAgentSource;
+  readonly entryPath: string;
+  readonly importSpecifier: string;
+  readonly config: Record<string, unknown>;
   readonly namespace: string;
   readonly packageName: string;
   readonly packageRoot: string;
@@ -36,24 +41,16 @@ export function createBundledExtensionMount(
     modules: [
       {
         logicalPath,
-        loadNamespace: async () => {
-          const container = globalThis as Record<symbol, unknown>;
-          const scopeSymbol = Symbol.for("eve.ext-config-scope");
-          const previousScope = container[scopeSymbol];
-          container[scopeSymbol] = packageStateNamespace(packageName);
-          try {
-            return { default: await descriptor.loadMount() };
-          } finally {
-            if (previousScope === undefined) delete container[scopeSymbol];
-            else container[scopeSymbol] = previousScope;
-          }
-        },
+        loadNamespace: async () => ({ default: await descriptor.loadMount() }),
       },
     ],
   });
 
   return Object.freeze({
     declaration,
+    entryPath: descriptor.entryPath,
+    importSpecifier: descriptor.importSpecifier,
+    config: descriptor.config,
     namespace: descriptor.namespace,
     packageName,
     packageRoot,

@@ -9,6 +9,7 @@ import type {
   ScheduleSourceRef,
   SkillSourceRef,
 } from "#discover/manifest.js";
+import { mountRefNamespace } from "#discover/extensions.js";
 import { stripLogicalPathExtension } from "#discover/filesystem.js";
 import type { ModuleSourceRef } from "#shared/source-ref.js";
 import type {
@@ -77,6 +78,7 @@ const MODULE_KIND_BY_SLOT_ROOT: Partial<
 };
 
 export interface ProjectedSubagentSource {
+  readonly mountId?: string;
   readonly candidate: AgentResourceCandidate;
   readonly nodePath: string;
   readonly extensionScope?: { readonly namespace: string; readonly sourceRoot: string };
@@ -98,6 +100,7 @@ export function projectAgentSources(input: {
   readonly nodeId: string;
   readonly nodePath: string;
   readonly owner?: AgentSourceOwner;
+  readonly mountId?: string;
 }): ProjectedAgentSources {
   const owner = input.owner ?? { kind: "application" as const };
   const candidates: AgentSourceCandidate[] = [];
@@ -113,6 +116,13 @@ export function projectAgentSources(input: {
     nodeId: input.nodeId,
     subagentsPath: posix.join(input.nodePath, "subagents"),
     owner,
+    mountId: input.mountId,
+    declarationMountIds: new Map(
+      input.manifest.extensions.map((source) => [
+        source.sourceId,
+        posix.join(input.nodePath, "extensions", mountRefNamespace(source.logicalPath)),
+      ]),
+    ),
     resources,
     subagents,
   });
@@ -140,6 +150,7 @@ export function projectAgentSources(input: {
       nodeId: input.nodeId,
       subagentsPath: posix.join(mountId, "subagents"),
       owner: extensionOwner,
+      mountId,
       resources,
       sourceIdPrefix: `ext:${mount.namespace}:`,
       subagents,
@@ -154,6 +165,7 @@ export function projectAgentSources(input: {
         nodeId: input.nodeId,
         subagentsPath: posix.join(mountId, "subagents"),
         owner: { kind: "application" },
+        mountId,
         resources,
         sourceIdPrefix: `ext-override:${mount.namespace}:`,
         subagents,
@@ -190,6 +202,7 @@ function createFilesystemModuleCandidate(input: {
   readonly logicalPath: string;
   readonly nodeId: string;
   readonly owner: AgentSourceOwner;
+  readonly mountId?: string;
   readonly source: ModuleSourceRef;
   readonly sourceId?: string;
   readonly sourceRoot: string;
@@ -200,6 +213,7 @@ function createFilesystemModuleCandidate(input: {
       ? { extensionScope: input.extensionScope }
       : {}),
     kind: "filesystem" as const,
+    mountId: input.mountId,
     sourcePath: join(input.sourceRoot, input.source.logicalPath),
   };
   return {
@@ -251,6 +265,7 @@ function createExtensionManifestSourceProjection(
 
 function projectManifest(input: {
   readonly candidates: AgentSourceCandidate[];
+  readonly declarationMountIds?: ReadonlyMap<string, string>;
   readonly externalDependencies: readonly string[];
   readonly projection: ManifestSourceProjection;
   readonly layer: AgentSourceLayer;
@@ -258,13 +273,18 @@ function projectManifest(input: {
   readonly nodeId: string;
   readonly subagentsPath: string;
   readonly owner: AgentSourceOwner;
+  readonly mountId?: string;
   readonly resources: ProjectedResourceSource[];
   readonly sourceIdPrefix?: string;
   readonly subagents: ProjectedSubagentSource[];
 }): void {
   const { projection } = input;
   const sourceId = (id: string) => `${input.sourceIdPrefix ?? ""}${id}`;
-  const pushModule = (source: ModuleSourceRef, logicalPathOverride?: string) => {
+  const pushModule = (
+    source: ModuleSourceRef,
+    logicalPathOverride?: string,
+    mountId = input.mountId,
+  ) => {
     const logicalPath = projection.logicalPath(logicalPathOverride ?? source.logicalPath);
     const candidate = createFilesystemModuleCandidate({
       externalDependencies: input.externalDependencies,
@@ -275,6 +295,7 @@ function projectManifest(input: {
       logicalPath,
       nodeId: input.nodeId,
       owner: input.owner,
+      mountId,
       source,
       sourceId: sourceId(source.sourceId),
       sourceRoot: input.manifest.agentRoot,
@@ -326,7 +347,9 @@ function projectManifest(input: {
       canonicalSourceSlot(logicalPath) === "agent" ? undefined : "agent.ts",
     );
   }
-  for (const source of input.manifest.extensions) pushModule(source);
+  for (const source of input.manifest.extensions) {
+    pushModule(source, undefined, input.declarationMountIds?.get(source.sourceId));
+  }
   for (const source of input.manifest.channels) pushModule(source);
   for (const source of input.manifest.connections) pushModule(source);
   for (const source of input.manifest.hooks) pushModule(source);
@@ -371,6 +394,7 @@ function projectManifest(input: {
     input.candidates.push(candidate);
     input.subagents.push({
       candidate,
+      mountId: input.mountId,
       nodePath: posix.join(input.subagentsPath, source.subagentId),
       ...(projection.extensionScope === undefined
         ? {}

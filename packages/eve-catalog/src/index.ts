@@ -389,7 +389,7 @@ export const INTEGRATIONS: readonly IntegrationEntry[] = [
     name: "DataForSEO",
     kind: "connection",
     tagline: "Run SEO, keyword, and SERP data lookups through DataForSEO's MCP server.",
-    surfaces: { scaffoldable: true, registry: true, gallery: false },
+    surfaces: { scaffoldable: false, registry: true, gallery: false },
     connection: {
       description:
         "DataForSEO: run SEO, keyword, and SERP data lookups through DataForSEO's MCP server.",

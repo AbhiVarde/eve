@@ -1,4 +1,5 @@
 import { basename, relative, resolve } from "node:path";
+import type { JsonObject } from "#shared/json.js";
 import type {
   MarkdownSourceRef,
   ModuleSourceRef,
@@ -149,11 +150,11 @@ export type ExtensionSourceRef = ModuleSourceRef;
 export interface ResolvedExtensionMount {
   /** Programmatic declaration used when the mount does not exist on disk. */
   readonly programmaticDeclaration?: {
-    readonly importSpecifier: string;
-    readonly entryPath: string;
-    readonly config: Record<string, unknown>;
     readonly logicalPath: string;
     readonly sourceId: string;
+    readonly importSpecifier: string;
+    readonly entryPath: string;
+    readonly config: JsonObject;
   };
   /** Mount namespace derived from the mount filename (e.g. `crm`). */
   readonly namespace: string;

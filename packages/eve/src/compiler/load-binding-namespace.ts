@@ -5,14 +5,19 @@ import {
   memoizeModuleNamespaceFactories,
   type ProgrammaticModuleNamespace,
 } from "#compiler/source-graph.js";
-import { bindingMountId } from "#compiler/extension-mount-bindings.js";
-import type { ExtensionCompileMount } from "#compiler/extension-mount-evaluation.js";
-import { packageStateNamespace } from "#discover/extensions.js";
-import { loadAuthoredModuleNamespace } from "#internal/authored-module-loader.js";
+import {
+  loadAuthoredModuleNamespace,
+  type AuthoredModuleLoadOptions,
+} from "#internal/authored-module-loader.js";
 
 export type CompiledBindingNamespaceLoader = (
   sourceId: string,
 ) => Promise<ProgrammaticModuleNamespace>;
+
+export interface ExtensionCompileMount {
+  readonly mountId: string;
+  readonly entry?: NonNullable<AuthoredModuleLoadOptions["extension"]>["entry"];
+}
 
 /** Loads one node's selected bindings with dependency ordering and per-phase caching. */
 export function createCompiledBindingNamespaceLoader(input: {
@@ -72,11 +77,23 @@ async function loadCompiledBindingNamespace(input: {
   readonly registries: readonly AgentSourceRegistry[];
 }): Promise<ProgrammaticModuleNamespace> {
   if (input.binding.backing.kind === "filesystem") {
+    const mountId =
+      input.binding.owner.kind === "extension" ? input.binding.owner.mountId : undefined;
+    const mount = mountId === undefined ? undefined : input.mounts?.get(mountId);
+    if (mountId !== undefined && input.mounts !== undefined && mount === undefined) {
+      throw new Error(`Missing mount "${mountId}" for extension contribution.`);
+    }
+    const extension: AuthoredModuleLoadOptions["extension"] =
+      mountId === undefined
+        ? undefined
+        : {
+            mountId,
+            evaluationId: input.evaluationId,
+            entry: mount?.entry,
+          };
     return await loadAuthoredModuleNamespace(input.binding.backing.sourcePath, {
       externalDependencies: input.binding.backing.externalDependencies,
-      extensionScopeNamespace: resolveCompiledModuleExtensionScopeNamespace(input.binding),
-      mount: input.mounts?.get(bindingMountId(input.binding) ?? ""),
-      evaluationId: input.evaluationId,
+      extension,
     });
   }
   const dependencyNamespaces = Object.fromEntries(
@@ -93,11 +110,7 @@ async function loadCompiledBindingNamespace(input: {
   });
 }
 
-/** Derives the legacy package-owned state scope used while loading an extension module. */
-export function resolveCompiledModuleExtensionScopeNamespace(
-  binding: AgentModuleBinding,
-): string | undefined {
-  return binding.owner.kind === "extension"
-    ? packageStateNamespace(binding.owner.packageName)
-    : undefined;
+/** Derives the owning mount for state handles in an extension module. */
+export function resolveExtensionBindingMountId(binding: AgentModuleBinding): string | undefined {
+  return binding.owner.kind === "extension" ? binding.owner.mountId : undefined;
 }

@@ -131,9 +131,14 @@ export type AgentSourceOwner =
   | { readonly feature: string; readonly kind: "framework" }
   | {
       readonly kind: "extension";
+      readonly mountId: string;
       readonly namespace: string;
       readonly packageName: string;
     };
+
+export function extensionMountId(nodePath: string, namespace: string): string {
+  return posix.join(nodePath, "extensions", namespace);
+}
 
 export type AgentSourceLayer =
   | "framework-default"

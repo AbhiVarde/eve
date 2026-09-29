@@ -12,6 +12,7 @@ import type { ModuleSourceRef } from "#shared/source-ref.js";
 import { normalizeSubagentConfig } from "#compiler/normalize-subagent.js";
 import {
   canonicalSourceSlot,
+  extensionMountId,
   type AgentModuleCandidate,
   type AgentSourceOwner,
   type AgentSourceRegistry,
@@ -167,6 +168,7 @@ export function createCompiledRemoteAgent(input: {
 export function compileExtensionMounts(
   manifest: AgentSourceManifest,
   composed: ComposedAgentModuleCandidates,
+  nodePath: string,
 ): CompiledExtensionMount[] {
   const selected = collectSelectedSourceIds(composed);
   return manifest.resolvedExtensions.flatMap((mount) => {
@@ -181,6 +183,7 @@ export function compileExtensionMounts(
         mountSourceId: mountRef.sourceId,
         namespace: mount.namespace,
         packageName: mount.packageName,
+        mountId: extensionMountId(nodePath, mount.namespace),
         packageNamespace: packageStateNamespace(mount.packageName),
         sourceRoot: mount.sourceRoot,
       },

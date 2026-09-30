@@ -8,10 +8,10 @@ import {
   withSessionStateDelta,
   type WithSessionStateDelta,
 } from "#execution/session/state-delta.js";
+import { relayWithdrawnRequests } from "#execution/tools/workflow/withdraw-step.js";
 import { emitCancelledTurn } from "#harness/cancelled-turn-emission.js";
 import { clearPendingSessionLimitPrompt } from "#harness/input-requests.js";
 import { getHarnessEmissionState, setHarnessEmissionState } from "#harness/emission.js";
-import { clearAllProxyInputRequests } from "#harness/proxy-input-requests.js";
 import { removeBlockingWorkflowToolRuns } from "#harness/workflow-tool-runs.js";
 import { getTurnUsageState, takeSessionUsageDelta } from "#harness/turn-tag-state.js";
 import type { TokenUsage } from "#shared/token-usage.js";
@@ -35,10 +35,11 @@ interface CancelledTurnSettleInput {
 }
 
 /**
- * Settles one cancelled turn: emits `turn.cancelled` → `session.waiting`,
- * drops pending coordination state, and persists the between-turns
- * session. Runs in the owner, whose wake sources exclude the
- * cancel hook, so a queued cancel wake cannot re-dispatch it.
+ * Settles one cancelled turn: relays `input.resolved` for every request the
+ * session proxies, emits `turn.cancelled` → `session.waiting`, drops pending
+ * coordination state, and persists the between-turns session. Runs in the
+ * owner, whose wake sources exclude the cancel hook, so a queued cancel wake
+ * cannot re-dispatch it.
  */
 export async function settleCancelledTurnStep(
   input: CancelledTurnSettleInput,
@@ -51,7 +52,9 @@ export async function settleCancelledTurnStep(
 export async function settleCancelledTurn(
   input: CancelledTurnSettleInput,
 ): Promise<CancelledTurnSettleResult> {
-  const step = await restoreSessionStep(input);
+  // The cancel stopped every descendant and task, so nobody can answer a request the session relays.
+  const relayed = await relayWithdrawnRequests(input, () => true);
+  const step = await restoreSessionStep({ ...relayed, sessionWritable: input.sessionWritable });
   const durableState = step.durableSession.state;
   const { published, result: usage } = await publishFromSessionStep(step, {
     origin: "own",
@@ -68,10 +71,8 @@ export async function settleCancelledTurn(
         input.sessionState.emissionState.turnId;
       const cancelledSession = setHarnessEmissionState(
         clearPendingSessionLimitPrompt(
-          clearAllProxyInputRequests(
-            commitCancelledCoordinationBatch(
-              removeBlockingWorkflowToolRuns({ ...session, outputSchema: undefined }, owningTurnId),
-            ),
+          commitCancelledCoordinationBatch(
+            removeBlockingWorkflowToolRuns({ ...session, outputSchema: undefined }, owningTurnId),
           ),
         ),
         emissionState,

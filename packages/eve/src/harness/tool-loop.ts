@@ -53,6 +53,7 @@ import {
 } from "#context/build-dynamic-tools.js";
 import { buildDynamicSubagentTools } from "#context/dynamic-subagent-lifecycle.js";
 import { PendingSkillAnnouncementKey } from "#context/dynamic-skill-lifecycle.js";
+import { getPendingAnnouncements } from "#harness/announcements.js";
 import { toErrorMessage } from "#shared/errors.js";
 import {
   createActionResultEvent,
@@ -702,17 +703,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
         const batch = getPendingInputBatches(session.state).find((batch) =>
           batch.requests.some((entry) => entry.requestId === request.requestId),
         );
-        const tools = await prepareApprovalTools(batch);
-        const expected = batch?.toolReplayIdentities?.[request.requestId];
-        if (
-          expected !== undefined &&
-          config.toolReplayIdentity?.(request.action.toolName) !== expected
-        ) {
-          const available = new Map(tools);
-          available.delete(request.action.toolName);
-          return available;
-        }
-        return tools;
+        return await prepareApprovalTools(batch);
       },
     });
     session = coordinated.session;
@@ -1246,15 +1237,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
         authoredTools: config.tools,
         context: ctx,
       });
-      for (const { request, toolReplayIdentity } of replayRequests) {
-        if (
-          toolReplayIdentity !== undefined &&
-          config.toolReplayIdentity?.(request.action.toolName) !== toolReplayIdentity
-        ) {
-          throw new Error(
-            "The connection for this tool call changed or is unavailable. Request a new tool call and approval.",
-          );
-        }
+      for (const { request } of replayRequests) {
         if (!replayTools.has(request.action.toolName)) {
           throw new Error(
             "The approved tool is no longer available. Request a new tool call and approval.",
@@ -1294,6 +1277,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
       );
       currentMessages.addAnnouncements({
         availableSkills: ctx?.get(PendingSkillAnnouncementKey),
+        keyed: getPendingAnnouncements(ctx),
       });
       const pendingApprovals = renderPendingApprovalsInstruction(
         getPendingInputBatches(session.state).flatMap((batch) => batch.requests),
@@ -2689,7 +2673,6 @@ async function handleStepResult(input: {
         turnId: emissionState.turnId,
       },
       requests: inputRequests,
-      toolReplayIdentities: captureToolReplayIdentities(config, approvalRequests),
       responseAuthRequiredRequestIds: responsePolicyRequestIds(config, approvalRequests),
       responseMessages: [],
       session: parkedSession,
@@ -2722,7 +2705,6 @@ async function handleStepResult(input: {
         turnId: emissionState.turnId,
       },
       requests: inputRequests,
-      toolReplayIdentities: captureToolReplayIdentities(config, approvalRequests),
       responseAuthRequiredRequestIds: responsePolicyRequestIds(config, approvalRequests),
       responseMessages: pendingResponseMessages,
       session: { ...baseSession, history: parkedInputHistory },
@@ -3204,22 +3186,6 @@ async function maybeCompact(input: {
 }
 
 /**
- * Creates an approval-key resolver from the tool map. The resolver computes
- * compound keys at recording time instead of pre-computing and persisting
- * them on the pending batch.
- */
-function captureToolReplayIdentities(
-  config: ToolLoopHarnessConfig,
-  requests: readonly InputRequest[],
-): Readonly<Record<string, string>> | undefined {
-  const identities = requests.flatMap((request) => {
-    const identity = config.toolReplayIdentity?.(request.action.toolName);
-    return identity === undefined ? [] : [[request.requestId, identity]];
-  });
-  return identities.length === 0 ? undefined : Object.fromEntries(identities);
-}
-
-/**
  * The approvals whose tool defines a response policy. Every park path records
  * them, so no Approve or Cancel of such an approval skips the policy.
  */
@@ -3241,6 +3207,11 @@ function responsePolicyRequestIds(
     .map((request) => request.requestId);
 }
 
+/**
+ * Creates an approval-key resolver from the tool map. The resolver computes
+ * compound keys at recording time instead of pre-computing and persisting
+ * them on the pending batch.
+ */
 function resolveApprovalKeyFromTools(
   tools: HarnessToolMap,
 ): (request: InputRequest) => string | undefined {

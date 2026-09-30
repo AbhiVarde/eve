@@ -582,11 +582,11 @@ class AgentGraphCompiler {
           break;
         }
         case "tool": {
+          assertFrameworkToolPolicy(candidate);
           const result = await compileToolEntry(input.manifest.agentRoot, entry.source, {
             binding: binding!,
             loadNamespace,
           });
-          assertFrameworkToolPolicy(candidate, result);
           if (result.kind === "disabled") {
             state.composed = disableComposedCandidate({
               allowUnmatched: canDisableToolWithoutSelectedSource(state, result.name),

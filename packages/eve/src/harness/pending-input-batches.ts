@@ -29,7 +29,6 @@ export interface PendingInputBatchEvent {
  * assistant turn's requests plus its withheld model output.
  */
 export interface PendingInputBatch {
-  readonly toolReplayIdentities?: Readonly<Record<string, string>>;
   readonly event?: PendingInputBatchEvent;
   readonly requests: readonly InputRequest[];
   /**
@@ -144,7 +143,6 @@ function setPendingInputBatches(
       event: batch.event,
       requester: batch.requester,
       responseAuthRequiredRequestIds: batch.responseAuthRequiredRequestIds,
-      toolReplayIdentities: batch.toolReplayIdentities,
       requests: [...batch.requests],
       responseMessages: [...batch.responseMessages],
     }));
@@ -158,7 +156,6 @@ function setPendingInputBatches(
  * batches stay open and independently answerable.
  */
 export function appendPendingInputBatch(input: {
-  readonly toolReplayIdentities?: Readonly<Record<string, string>>;
   readonly event?: PendingInputBatchEvent;
   readonly requests: readonly InputRequest[];
   readonly responseAuthRequiredRequestIds?: readonly string[];
@@ -171,7 +168,6 @@ export function appendPendingInputBatch(input: {
       event: input.event,
       requester: currentRequester(),
       responseAuthRequiredRequestIds: input.responseAuthRequiredRequestIds,
-      toolReplayIdentities: input.toolReplayIdentities,
       requests: input.requests,
       responseMessages: input.responseMessages,
     },

@@ -3,16 +3,17 @@ import { z } from "zod";
 
 import { fixtureAuthorizationCallback } from "../agent/lib/fake-service.ts";
 
-const searchResult = z.array(z.object({ qualifiedName: z.string() }));
+const searchResult = z.object({
+  tools: z.array(z.object({ connection: z.string(), tool: z.string(), signature: z.string() })),
+});
 
 export default defineEval({
-  description:
-    "Connection search pauses for sign-in, then discovers tools over authenticated HTTP.",
+  description: "Connection search pauses for sign-in, then finds tools over authenticated HTTP.",
   timeoutMs: 90_000,
 
   async test(t) {
     const started = await t.send(
-      "Alice wants to see which tools are available in private-catalog. Search for its items tools, then report the available tool names.",
+      "Alice wants to see which tools are available in private-catalog. Search that connection for its items tools, then report the available tool names.",
     );
     const session = started.session;
     started.expectOk();
@@ -51,10 +52,17 @@ export default defineEval({
         const result = searchResult.safeParse(value);
         return (
           result.success &&
-          result.data.some((entry) => entry.qualifiedName === "private-catalog__list_items")
+          result.data.tools.some(
+            (entry) =>
+              entry.connection === "private-catalog" &&
+              entry.tool === "list_items" &&
+              entry.signature.startsWith("list_items("),
+          )
         );
       },
     });
-    completed.messageIncludes("private-catalog__list_items");
+    // Calling the tool needs the token in a later step. A real provider persists
+    // it; this fixture's fake provider keeps none after sign-in.
+    completed.messageIncludes("list_items");
   },
 });

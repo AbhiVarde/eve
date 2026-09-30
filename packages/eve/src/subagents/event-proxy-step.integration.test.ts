@@ -6,6 +6,7 @@ import { ContextContainer } from "#context/container.js";
 import {
   AuthKey,
   ContinuationTokenKey,
+  LegacyRemoteAgentCallerKey,
   SessionCallbackKey,
   SessionIdKey,
   SessionInboxKey,
@@ -14,7 +15,7 @@ import type { DurableSession } from "#execution/durable-session-store.js";
 import { openSessionEventPublisher } from "#execution/publish-session-events.js";
 import { createSessionLimitContinuationRequest } from "#harness/session-limit-continuation.js";
 import { getProxyInputRequests } from "#harness/proxy-input-requests.js";
-import type { MessageStreamEvent } from "#protocol/message.js";
+import { createAuthorizationRequiredEvent, type MessageStreamEvent } from "#protocol/message.js";
 import type { HookContext } from "#public/definitions/hook.js";
 import { createRuntimeHookRegistry } from "#runtime/hooks/registry.js";
 import {
@@ -204,6 +205,79 @@ describe("proxied stream hooks", () => {
       expect(f.events.map((event) => event.type)).toEqual(["input.requested"]);
     } finally {
       publisher.writer.release();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("sends a protocol-1 background task the task callbacks it expects", async () => {
+    const f = fixture();
+    f.ctx.set(SessionCallbackKey, {
+      callId: "remote-call",
+      subagentName: "remote-child",
+      token: "parent-reply",
+      url: "https://parent.example/eve/v1/callback/parent-reply",
+    });
+    f.ctx.set(LegacyRemoteAgentCallerKey, { taskId: "task-1" });
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
+      Response.json({ ok: true }, { status: 202 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const sink = createSessionEventSink({
+      ctx: f.ctx,
+      sessionId: "parent-session",
+      sessionWritable: f.sessionWritable,
+    });
+    const signIn = createAuthorizationRequiredEvent({
+      description: "Sign in to Datadog",
+      name: "datadog",
+      sequence: 8,
+      stepIndex: 2,
+      turnId: "child-turn",
+    });
+    try {
+      await sink.emit({ type: "input.requested", data: f.hookPayload.event });
+      await sink.emit(signIn);
+      const bodies = fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body as string));
+      const envelope = {
+        callId: "remote-call",
+        childContinuationToken: "http:parent",
+        childSessionId: "parent-session",
+        subagentName: "remote-child",
+        taskId: "task-1",
+      };
+      expect(bodies).toEqual([
+        { ...envelope, event: f.hookPayload.event, kind: "task.input-requested" },
+        { ...envelope, event: signIn, kind: "task.authorization" },
+      ]);
+      expect(f.order).not.toContain("channel:input.requested");
+    } finally {
+      sink.release();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a protocol-1 caller's input on its own channel outside a background task", async () => {
+    const f = fixture();
+    f.ctx.set(SessionCallbackKey, {
+      callId: "remote-call",
+      subagentName: "remote-child",
+      token: "parent-reply",
+      url: "https://parent.example/eve/v1/callback/parent-reply",
+    });
+    f.ctx.set(LegacyRemoteAgentCallerKey, {});
+    const fetchMock = vi.fn(async () => Response.json({ ok: true }, { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const sink = createSessionEventSink({
+      ctx: f.ctx,
+      sessionId: "parent-session",
+      sessionWritable: f.sessionWritable,
+    });
+    try {
+      await sink.emit({ type: "input.requested", data: f.hookPayload.event });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(f.order).toContain("channel:input.requested");
+    } finally {
+      sink.release();
       vi.unstubAllGlobals();
     }
   });

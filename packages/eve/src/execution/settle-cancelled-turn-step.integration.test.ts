@@ -1,8 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import { ContextContainer } from "#context/container.js";
-import { ActivityPendingBlockersKey } from "#context/keys.js";
-import { deserializeContext } from "#context/serialize.js";
 import type { HarnessSession, SessionStateMap } from "#harness/types.js";
 import { readDurableSession } from "#execution/durable-session-store.js";
 import { appendPendingInputBatch } from "#harness/pending-input-batches.js";
@@ -14,26 +11,31 @@ import {
   setTurnUsageState,
   takeSessionUsageDelta,
 } from "#harness/turn-tag-state.js";
+import { createTestRuntime } from "#internal/testing/app-harness.js";
 import { createTestSessionState } from "#internal/testing/session-state.js";
 import { runSessionStateStep } from "#internal/testing/session-state-step.js";
+import { createBundledRuntimeCompiledArtifactsSource } from "#runtime/compiled-artifacts-source.js";
 
-// The turn's stream events and channel context are not under test; the usage
-// the step reports and the session it persists are.
-vi.mock("#context/serialize.js", () => ({
-  deserializeContext: vi.fn(async () => new ContextContainer()),
-  serializeContext: () => ({}),
-}));
-vi.mock("#execution/publish-session-events.js", () => ({
-  withSessionEventEmitter: async (
-    input: { readonly durableSession: HarnessSession },
-    emitEvents: (
-      emit: () => Promise<void>,
-      session: HarnessSession,
-    ) => Promise<{ readonly result: unknown; readonly session: HarnessSession }>,
-    // Hydration of a session with no compaction history yields empty compaction state.
-  ) =>
-    await emitEvents(async () => {}, { ...input.durableSession, compaction: {} } as HarnessSession),
-}));
+const serializedContext = {
+  "eve.auth": null,
+  "eve.bundle": { source: createBundledRuntimeCompiledArtifactsSource() },
+  "eve.channel": { kind: "http", state: {} },
+  "eve.continuationToken": "test-token",
+  "eve.sessionId": "test-session",
+};
+
+/** Runs the step in a real runtime, so it publishes through the session's real publication path. */
+async function settleCancelledTurn(
+  input: Omit<Parameters<typeof settleCancelledTurnStep>[0], "sessionWritable">,
+) {
+  const runtime = await createTestRuntime({ agent: { name: "settle-cancelled-turn" } });
+  return await runtime.run(() =>
+    runSessionStateStep(
+      { ...input, sessionWritable: new WritableStream<Uint8Array>() },
+      settleCancelledTurnStep,
+    ),
+  );
+}
 
 function spend<T extends { readonly state?: SessionStateMap }>(
   session: T,
@@ -73,18 +75,16 @@ describe("settleCancelledTurnStep", () => {
         (session, requests) => appendPendingInputBatch({ requests, responseMessages: [], session }),
         { state: base.snapshot.session.state } as HarnessSession,
       );
-    const ctx = new ContextContainer();
-    ctx.set(ActivityPendingBlockersKey, ["child-question-1", "approval-1", "limit-1"]);
-    vi.mocked(deserializeContext).mockResolvedValueOnce(ctx);
-
-    await settleCancelledTurnStep({
+    const result = await settleCancelledTurn({
       reportUsage: false,
-      serializedContext: {},
+      serializedContext: {
+        ...serializedContext,
+        "eve.activityPendingBlockers": ["child-question-1", "approval-1", "limit-1"],
+      },
       sessionState: { ...base, snapshot: { session: { ...base.snapshot.session, ...parked } } },
-      sessionWritable: new WritableStream<Uint8Array>(),
     });
 
-    expect(ctx.get(ActivityPendingBlockersKey)).toEqual(["approval-1"]);
+    expect(result.serializedContext["eve.activityPendingBlockers"]).toEqual(["approval-1"]);
   });
 
   it.each([
@@ -102,15 +102,11 @@ describe("settleCancelledTurnStep", () => {
       // Its next turn spent 50 more before Alice cancelled it.
       const cancelling = spend(settled, 50, "turn_2");
 
-      const result = await runSessionStateStep(
-        {
-          reportUsage,
-          serializedContext: {},
-          sessionState: { ...base, snapshot: { session: cancelling } },
-          sessionWritable: new WritableStream<Uint8Array>(),
-        },
-        settleCancelledTurnStep,
-      );
+      const result = await settleCancelledTurn({
+        reportUsage,
+        serializedContext,
+        sessionState: { ...base, snapshot: { session: cancelling } },
+      });
 
       expect(result.usage?.inputTokens).toBe(reported);
       // The next settled turn reports whatever the cancel didn't.

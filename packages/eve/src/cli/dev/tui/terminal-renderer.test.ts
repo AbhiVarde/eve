@@ -3246,6 +3246,54 @@ describe("TerminalRenderer (inline scrollback)", () => {
     renderer.shutdown();
   });
 
+  it("shows Workflow SDK stderr only when every log is shown and still records it", () => {
+    const screen = new MockScreen({ columns: 140, rows: 30 });
+    const input = new MockUserInput();
+    const stub = stubDiagnostics();
+    const renderer = new TerminalRenderer({
+      input,
+      output: screen,
+      captureForeignOutput: true,
+      logs: "stderr",
+      unicode: true,
+      diagnostics: stub.diagnostics,
+    });
+    renderer.renderAgentHeader({ name: "Weather Agent", serverUrl: "http://localhost:3000" });
+    const detail = [
+      "[workflow-sdk] Step execution already in flight in this process; awaiting its settlement instead of executing again",
+      "  run    wrun_01",
+      "[workflow-sdk] Encountered FatalError while executing step",
+      "FatalError: step body threw",
+      "    at releaseStep (release-step.ts:1:1)",
+      "[eve:dev] agent reloaded",
+    ].join("\n");
+    // Pipe chunks from the server process can carry several records and can
+    // split one record, even mid-line.
+    const split = detail.indexOf("body threw");
+
+    process.stderr.write(detail.slice(0, split));
+    process.stderr.write(`${detail.slice(split)}\n`);
+
+    const recorded = stub.append.mock.calls
+      .map(([entry]) => entry as { source: string; detail?: string })
+      .filter((entry) => entry.source === "stderr")
+      .map((entry) => entry.detail);
+    expect(recorded.join("\n")).toBe(detail);
+    const hidden = screen.snapshot();
+    expect(hidden).toContain("[eve:dev] agent reloaded");
+    expect(hidden).not.toContain("[workflow-sdk]");
+    expect(hidden).not.toContain("wrun_01");
+    expect(hidden).not.toContain("step body threw");
+
+    renderer.setLogDisplayMode("all");
+    // Adjacent log blocks collapse to the newest, so the split record's tail
+    // proves the hidden segments are revealed.
+    const shown = screen.snapshot();
+    expect(shown).toContain("FatalError: step body threw");
+    expect(shown).toContain("[eve:dev] agent reloaded");
+    renderer.shutdown();
+  });
+
   it("subscribes the recorder to log records, displays them, and releases on shutdown", () => {
     const screen = new MockScreen({ columns: 120, rows: 30 });
     const input = new MockUserInput();

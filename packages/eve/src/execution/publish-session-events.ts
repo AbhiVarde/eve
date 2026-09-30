@@ -5,7 +5,6 @@ import { dispatchStreamEventHooks } from "#context/hook-lifecycle.js";
 import { ParentSessionKey, TurnDeliveryIdsKey } from "#context/keys.js";
 import { withContextScope } from "#context/run-step.js";
 import { deserializeContext, serializeContext } from "#context/serialize.js";
-import * as activityCohort from "#execution/activity-cohort.js";
 import { setChannelContext } from "#execution/channel-context.js";
 import { forwardSessionInput } from "#execution/forward-session-input.js";
 import {
@@ -16,7 +15,6 @@ import {
 } from "#execution/durable-session-store.js";
 import { resolveEffectiveAgentRuntime } from "#execution/effective-agent-config.js";
 import { reconcileSessionContinuationToken } from "#execution/reconcile-session-continuation-token.js";
-import { observeSessionActivity } from "#execution/session-activity-projection.js";
 import { hydrateDurableSession } from "#execution/session.js";
 import { activeTurnId } from "#harness/active-turn-id.js";
 import { getHarnessEmissionState } from "#harness/emission.js";
@@ -36,14 +34,14 @@ const log = createLogger("execution.publish-session-events");
 /**
  * Whose event a session publishes. Every event reaches the channel adapter, the
  * session stream, and stream-event hooks. The session's own events also reach
- * its instrumentation and activity and carry its turn's delivery ids.
+ * its instrumentation and carry its turn's delivery ids.
  *
  * A relayed event belongs to an exchange this session carries for a child
  * session or a workflow run: the question or sign-in it raised, the turn
  * boundary that question causes here, and the `input.resolved` for the answer
- * this session routes back. This session's instrumentation and activity never
- * track that pending input, so no event of the exchange reaches them; the
- * child records its side as its own.
+ * this session routes back. This session's instrumentation never tracks that
+ * pending input, so no event of the exchange reaches it; the child records its
+ * side as its own.
  */
 export type SessionEventOrigin = "own" | "relayed";
 
@@ -186,7 +184,6 @@ async function publishInSessionScope<T>(
     ctx,
     inputSource: publication.inputSource,
     origin: publication.origin,
-    sessionId: session.sessionId,
     sessionWritable: step.sessionWritable,
   });
   try {
@@ -220,7 +217,7 @@ interface StreamWriter extends SessionEventWriter {
   write(event: UnstampedMessageStreamEvent): Promise<MessageStreamEvent>;
 }
 
-/** Dispatches a session's events to its channel, activity, and stream-event hooks. */
+/** Dispatches a session's events to its channel and stream-event hooks. */
 export interface SessionEventDispatcher {
   /** The context delivery hands the channel adapter; a turn step also hands it to `adapter.deliver`. */
   readonly adapterCtx: ChannelAdapterContext;
@@ -233,13 +230,10 @@ export interface SessionEventDispatcher {
 
 interface EventDispatcher extends SessionEventDispatcher {
   /**
-   * Channel delivery: the activity state update, then `forwardSessionInput` or
-   * the channel adapter's handler, then the channel context. Returns the event
-   * as the handler left it.
+   * Channel delivery: `forwardSessionInput` or the channel adapter's handler,
+   * then the channel context. Returns the event as the handler left it.
    */
   deliver(event: UnstampedMessageStreamEvent): Promise<UnstampedMessageStreamEvent>;
-  /** Projects a written event onto the session's activity. */
-  projectActivity(event: MessageStreamEvent): void;
 }
 
 /** A session's stream held by one step, with the dispatch of the events that step publishes. */
@@ -247,7 +241,7 @@ export interface SessionEventPublisher {
   readonly dispatcher: SessionEventDispatcher;
   readonly writer: SessionEventWriter;
   /**
-   * Delivers, writes, and projects one event the step produced, and returns it
+   * Delivers and writes one event the step produced, and returns it
    * as written for its hooks. Delivery comes first so the channel adapter's
    * handler shapes what is written.
    */
@@ -259,7 +253,6 @@ export interface SessionEventPublisher {
 export function openSessionEventPublisher(input: {
   readonly ctx: ContextContainer;
   readonly origin: SessionEventOrigin;
-  readonly sessionId: string;
   readonly sessionWritable: WritableStream<Uint8Array>;
   readonly inputSource?: string;
 }): SessionEventPublisher {
@@ -272,9 +265,7 @@ export function openSessionEventPublisher(input: {
     sessionWritable: input.sessionWritable,
   });
   const emit = async (event: UnstampedMessageStreamEvent): Promise<MessageStreamEvent> => {
-    const written = await writer.write(await dispatcher.deliver(event));
-    dispatcher.projectActivity(written);
-    return written;
+    return await writer.write(await dispatcher.deliver(event));
   };
   return {
     dispatcher,
@@ -288,18 +279,15 @@ export function openSessionEventPublisher(input: {
 
 function createSessionEventDispatcher(input: {
   readonly ctx: ContextContainer;
-  readonly origin: SessionEventOrigin;
-  readonly sessionId: string;
   readonly inputSource?: string;
 }): EventDispatcher {
-  const { ctx, inputSource, origin } = input;
+  const { ctx, inputSource } = input;
   const adapter = ctx.require(ChannelKey);
   const adapterCtx = buildAdapterContext(adapter, ctx);
 
   return {
     adapterCtx,
     async deliver(event) {
-      if (origin === "own") activityCohort.updateActivityState(ctx, event);
       const forwarded = await forwardSessionInput(ctx, event, inputSource);
       const routed = forwarded
         ? event
@@ -310,9 +298,6 @@ function createSessionEventDispatcher(input: {
           );
       setChannelContext(ctx, { ...adapter, state: { ...adapterCtx.state } });
       return routed;
-    },
-    projectActivity(event) {
-      if (origin === "own") void observeSessionActivity({ ctx, event, sessionId: input.sessionId });
     },
     async runHooks(event, cancelTurn) {
       // Read here rather than when the dispatcher is built: terminal delivery
@@ -390,7 +375,6 @@ export async function publishTerminalSessionEvent(input: {
     publisher = openSessionEventPublisher({
       ctx,
       origin: "own",
-      sessionId,
       sessionWritable: input.sessionWritable,
     });
   } catch (error) {

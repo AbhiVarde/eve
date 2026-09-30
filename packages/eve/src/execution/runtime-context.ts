@@ -14,7 +14,6 @@ import {
   InitiatorAuthKey,
   ParentSessionKey,
   ParentTraceContextKey,
-  ActivityObserverKey,
   ScheduleIdKey,
   SessionCallbackKey,
   LegacyRemoteAgentCallerKey,
@@ -97,9 +96,6 @@ export function buildRunContext(input: {
   }
   if (run.legacyRemoteAgentCaller !== undefined) {
     ctx.set(LegacyRemoteAgentCallerKey, run.legacyRemoteAgentCaller);
-  }
-  if (run.activityObserver !== undefined) {
-    ctx.set(ActivityObserverKey, run.activityObserver);
   }
 
   if (run.parent !== undefined) {

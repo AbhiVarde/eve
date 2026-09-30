@@ -2,7 +2,6 @@ import {
   commitCancelledCoordinationBatch,
   getPendingCoordinationBatch,
 } from "#harness/coordination.js";
-import { retainAnswerableActivityBlockers } from "#execution/activity-cohort.js";
 import type { DurableSessionState } from "#execution/durable-session-store.js";
 import { publishFromSessionStep, restoreSessionStep } from "#execution/publish-session-events.js";
 import {
@@ -54,8 +53,6 @@ export async function settleCancelledTurn(
 ): Promise<CancelledTurnSettleResult> {
   const step = await restoreSessionStep(input);
   const durableState = step.durableSession.state;
-  // Before `turn.cancelled` projects, so only what stays answerable holds the work open.
-  retainAnswerableActivityBlockers(step.ctx, durableState);
   const { published, result: usage } = await publishFromSessionStep(step, {
     origin: "own",
     publish: (emit) => emitCancelledTurn(emit, getHarnessEmissionState(durableState)),

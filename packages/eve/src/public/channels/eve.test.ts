@@ -58,13 +58,7 @@ const OVERRIDE_AUTH: SessionAuthContext = {
 
 type MockSendOptions = Pick<
   RunInput,
-  | "auth"
-  | "callback"
-  | "capabilities"
-  | "continuationToken"
-  | "activityObserver"
-  | "initiatorAuth"
-  | "title"
+  "auth" | "callback" | "capabilities" | "continuationToken" | "initiatorAuth" | "title"
 >;
 
 function createJsonMessageRequest(body: unknown): Request {
@@ -143,7 +137,6 @@ function createEveCreateHandler(
       callback: runInput.callback,
       capabilities: runInput.capabilities,
       continuationToken: runInput.continuationToken,
-      activityObserver: runInput.activityObserver,
       initiatorAuth: runInput.initiatorAuth,
       title: runInput.title,
     } satisfies MockSendOptions);
@@ -1424,7 +1417,6 @@ describe("eveChannel — remote agent protocol 1 callers", () => {
       });
       const runInput = handler.createSession.mock.calls[0]?.[0];
       expect(runInput?.callback).toEqual(callback);
-      expect(runInput?.activityObserver).toBeUndefined();
       expect(runInput?.legacyRemoteAgentCaller).toEqual(legacyCaller);
       expect(logs.records).toContainEqual(
         expect.objectContaining({
@@ -1445,7 +1437,6 @@ describe("eveChannel — remote agent protocol 1 callers", () => {
     expect(response.status).toBe(202);
     const options = handler.send.mock.calls[0]?.[1];
     expect(options?.callback).toEqual(callback);
-    expect(options?.activityObserver).toBeUndefined();
   });
 
   it("rejects a delegating caller on a protocol this deployment does not serve", async () => {

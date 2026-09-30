@@ -36,29 +36,19 @@ export interface LegacyRemoteAgentCaller {
 }
 
 /**
- * Removes the fields a protocol-1 caller adds when it delegates from a
- * background task: `callback.taskId` and a `task` activity work identity.
- * Current callers send neither. The task id is returned so the session can
- * name it back to the caller.
+ * Removes the `callback.taskId` a protocol-1 caller adds when it delegates
+ * from a background task. Current callers don't send it. The task id is
+ * returned so the session can name it back to the caller. The caller's
+ * `activityObserver` needs no removal: eve ignores that field from any caller.
  */
 export function splitLegacyTaskFields(input: Record<string, unknown>): {
   readonly payload: Record<string, unknown>;
   readonly taskId?: string;
 } {
-  const { activityObserver, callback } = input;
-  const hasTaskId = isObject(callback) && "taskId" in callback;
-  const hasTaskObserver =
-    isObject(activityObserver) &&
-    isObject(activityObserver.workIdentity) &&
-    activityObserver.workIdentity.kind === "task";
-  if (!hasTaskId && !hasTaskObserver) return { payload: input };
-
-  const payload = { ...input };
-  // Nested activity isn't relayed: current activity has no `task` work kind.
-  if (hasTaskObserver) delete payload.activityObserver;
-  if (!hasTaskId) return { payload };
+  const { callback } = input;
+  if (!isObject(callback) || !("taskId" in callback)) return { payload: input };
   const { taskId, ...rest } = callback;
-  payload.callback = rest;
+  const payload = { ...input, callback: rest };
   return typeof taskId === "string" && taskId.length > 0 ? { payload, taskId } : { payload };
 }
 

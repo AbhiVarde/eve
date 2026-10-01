@@ -24,8 +24,8 @@ import {
 } from "#public/channels/slack/hitl.js";
 import type { SlackMessage } from "#public/channels/slack/inbound.js";
 import { deliverPrivateInputRequest } from "#public/channels/slack/private-approval-delivery.js";
+import { deliverCompletedSlackReply } from "#public/channels/slack/reply-delivery.js";
 import {
-  SLACK_MARKDOWN_TEXT_MAX_LENGTH,
   SLACK_MAX_BLOCKS_PER_MESSAGE,
   truncateMessageText,
   truncateTypingStatus,
@@ -43,8 +43,6 @@ import type { InputRequest } from "#shared/input.js";
 const log = createLogger("slack.defaults");
 const REASONING_TYPING_REFRESH_INTERVAL_MS = 5_000;
 const REASONING_TYPING_MIN_PROGRESS_CHARS = 4;
-const LONG_RESPONSE_FILENAME = "eve-response.md";
-const LONG_RESPONSE_NOTICE = "Here's a snippet with the full response.";
 interface ReasoningAccumulator {
   readonly stepIndex: number;
   readonly text: string;
@@ -312,40 +310,6 @@ function groupInputRequestPostParts(
 }
 
 /**
- * Delivers a completed default Slack reply without sending content that
- * exceeds Slack's native Markdown limit. Long replies stay intact as one
- * Markdown snippet instead of being truncated or split across messages.
- */
-export async function postCompletedSlackReply(
-  channel: SlackContext,
-  message: string,
-): Promise<void> {
-  if (message.length <= SLACK_MARKDOWN_TEXT_MAX_LENGTH) {
-    await channel.thread.post(message);
-    return;
-  }
-
-  const file = {
-    data: new Blob([message], { type: "text/markdown" }),
-    filename: LONG_RESPONSE_FILENAME,
-    mimeType: "text/markdown",
-  };
-
-  const hasThread = channel.slack.threadTs.length > 0;
-  if (!hasThread) {
-    // Uploads cannot anchor proactive sessions; post the notice first.
-    const anchor = await channel.thread.post(LONG_RESPONSE_NOTICE);
-    if (!anchor.id || channel.slack.threadTs.length === 0) {
-      throw new Error("Slack did not return a thread timestamp for the long response notice.");
-    }
-  }
-  await channel.slack.uploadFiles([file], {
-    initialComment: hasThread ? LONG_RESPONSE_NOTICE : undefined,
-    snippetType: "markdown",
-  });
-}
-
-/**
  * eve's default Slack event rendering: status lines, replies, errors, and the
  * connection-authorization flow. It is the innermost link of every channel's
  * renderer chain. Typed as the internal full-context map because the default
@@ -516,7 +480,7 @@ export const defaultEvents: SlackChannelInternalEvents = {
       await channel.thread.startTyping();
       return;
     }
-    await postCompletedSlackReply(channel, event.message);
+    await deliverCompletedSlackReply(channel, event.message, { turnId: event.turnId });
   },
 
   async "turn.failed"(event, channel, _ctx) {

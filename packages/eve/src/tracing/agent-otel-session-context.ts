@@ -26,6 +26,7 @@ import type { AgentTurnTraceState } from "#tracing/agent-trace-state.js";
 import { applyPrincipalTraceDecision } from "#instrumentation/principal-summary.js";
 import { normalizeInstrumentationChannelKind } from "#internal/instrumentation.js";
 import type { ConversationEnvironment } from "#shared/conversation-context.js";
+import { traceSessionIdOf } from "#tracing/agent-otel-attributes.js";
 
 interface AgentOtelSessionContextInput {
   readonly environment: ConversationEnvironment;
@@ -70,6 +71,7 @@ export function createAgentOtelSessionContext(
         context: initialSessionContext(input, event, decision),
         parentLineage: event.parentLineage,
         rootSessionId: event.rootSessionId,
+        traceSessionId: traceSessionIdOf(event),
         scheduleId: event.scheduleId,
         title: event.title,
       };
@@ -107,6 +109,7 @@ export function createAgentOtelSessionContext(
       initiatorPrincipal: applyPrincipalTraceDecision(event.initiatorPrincipal, session.decision),
       parentLineage: event.parentLineage ?? session.parentLineage,
       rootSessionId: event.rootSessionId,
+      traceSessionId: traceSessionIdOf(event),
       sequence: event.sequence,
       startTimeMs: Date.now(),
       subagentName: (event.parentLineage ?? session.parentLineage)?.subagentName,

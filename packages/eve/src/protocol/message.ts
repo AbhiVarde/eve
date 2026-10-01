@@ -424,6 +424,12 @@ export interface TaskStartedStreamEvent {
 export interface TaskSettledStreamEvent {
   data: {
     callId: string;
+    /**
+     * Why the call was cancelled; present only when `status` is `"cancelled"`
+     * and the session stopped it. Absent when the task's run stopped on its
+     * own, and on events recorded by eve versions before it was added.
+     */
+    cancel?: { reason: TaskCancelReason };
     /** Why the call failed; present only when `status` is `"failed"`. */
     error?: { message: string };
     /**
@@ -444,6 +450,13 @@ export interface TaskSettledStreamEvent {
   };
   type: "task.settled";
 }
+
+/**
+ * Why the session cancelled a task call: the model called `task_cancel`,
+ * someone cancelled the turn (or, between turns, the tasks still working), or
+ * the turn ended while the task still worked.
+ */
+export type TaskCancelReason = "task_cancel" | "turn_cancelled" | "turn_ended";
 
 /**
  * Stream event emitted when one assistant text delta is appended to the
@@ -1427,6 +1440,7 @@ export function createTaskSettledEvent(
   };
   if (input.output !== undefined) data.output = input.output;
   if (input.error !== undefined) data.error = input.error;
+  if (input.cancel !== undefined) data.cancel = input.cancel;
   return { data, type: "task.settled" };
 }
 

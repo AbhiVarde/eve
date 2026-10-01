@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
+  closeSettledTasks,
   taskCardView,
   trackTaskCardEvent,
   type TaskCardBlocker,
@@ -22,11 +23,17 @@ import type {
   SlackEventContext,
 } from "#public/channels/slack/slackChannel.js";
 import { normalizeChannelAudience } from "#shared/channel-audience.js";
+import { formatDuration } from "#shared/format-duration.js";
+import { AGENT_TOOL_NAME } from "#tools/framework/agent-contract.js";
 
 const log = createLogger("slack.task-card");
 
 /** A plan block holds at most 50 tasks. */
 const MAX_PLAN_ROWS = 50;
+/** A plan title names at most this many agents before it counts tasks instead. */
+const MAX_NAMED_AGENTS = 3;
+/** Shorter work says nothing useful about time, so rows leave it out. */
+const MIN_SHOWN_DURATION_MS = 1_000;
 const MAX_TITLE_LENGTH = 80;
 const MAX_LINE_LENGTH = 100;
 /** Unfinished turns eve keeps tracking; the oldest drop first. */
@@ -46,42 +53,87 @@ interface SlackTaskObject {
 /**
  * eve's default task card: a `task_card` block for one task, or a `plan` block
  * for several, and no card for a turn that started none. A settled task shows
- * one line about how it ended. A task the model cancelled with `task_cancel`
- * shows as done, since it no longer needed the work; a failed task, or one
- * stopped any other way, shows as an error.
+ * one line about how it ended and how long it took. A task the model cancelled
+ * with `task_cancel` shows as done, since it no longer needed the work; a
+ * failed task, or one stopped any other way, shows as an error.
  */
 export function renderDefaultSlackTaskCard(view: TaskCardView): SlackTaskCard | null {
   if (view.tasks.length === 0) return null;
   const rows = collapseEarlierRows(view.tasks).map(toSlackTask);
   const title = planTitle(view);
+  // Slack keeps the rows a reader expanded only while the block id stays the same.
+  const block_id = slackBlockId(view.turnId);
   const blocks: BlockKitBlock[] =
     rows.length === 1
-      ? [{ type: "task_card", ...rows[0]! }]
-      : [{ type: "plan", tasks: rows, title }];
+      ? [{ block_id, type: "task_card", ...rows[0]! }]
+      : [{ block_id, type: "plan", tasks: rows, title }];
   const titles = view.tasks.map((task) => task.title).join(", ");
   return { blocks, text: truncateMessageText(`${title}: ${titles}`) };
 }
 
 function planTitle(view: TaskCardView): string {
+  const { tasks } = view;
   if (view.state === "blocked") {
-    const blocker = view.tasks.find((task) => task.blockedOn !== undefined)?.blockedOn;
+    const blocker = tasks.find((task) => task.blockedOn !== undefined)?.blockedOn;
     return waitingText(blocker?.kind ?? "input");
   }
-  const statuses = view.tasks.map((task) => task.status);
-  const total = statuses.length;
+  const total = tasks.length;
+  // One task renders as a `task_card` without a plan title, so naming it there
+  // would only repeat its row title in the notification text.
+  const names = (subset: readonly TaskCardTask[]) => (total > 1 ? agentNames(subset) : undefined);
   if (view.state === "working") {
-    const done = statuses.filter((status) => status !== "working" && status !== "blocked").length;
-    return done === 0
-      ? `Working on ${countTasks(total)}`
-      : `${String(done)} of ${countTasks(total)} done`;
+    const working = tasks.filter((task) => task.status === "working");
+    const done = total - working.length;
+    if (done === 0) {
+      const asking = names(tasks);
+      return asking === undefined ? `Working on ${countTasks(total)}` : `Asking ${asking}`;
+    }
+    const progress = `${String(done)} of ${countTasks(total)} done`;
+    const waitingOn = names(working);
+    return waitingOn === undefined ? progress : `Waiting on ${waitingOn} · ${progress}`;
   }
-  const failed = statuses.filter((status) => status === "failed").length;
-  const stopped = view.tasks.filter(isInterrupted).length;
+  const failed = tasks.filter((task) => task.status === "failed").length;
+  const stopped = tasks.filter(isInterrupted).length;
   const outcomes: string[] = [];
   if (failed > 0) outcomes.push(`${String(failed)} failed`);
   if (stopped > 0) outcomes.push(`${String(stopped)} stopped`);
-  const finished = `Finished ${countTasks(total)}`;
+  const took = turnDuration(tasks);
+  const finished = `Finished ${countTasks(total)}${took === undefined ? "" : ` in ${took}`}`;
   return outcomes.length === 0 ? finished : `${finished}: ${outcomes.join(", ")}`;
+}
+
+/**
+ * `d0`, `d0 and sre`, or `d0, sre, and index` when every task is a call to a
+ * named agent. A call to the agent's own copy, a tool task, or more than three
+ * agents falls back to a count.
+ */
+function agentNames(tasks: readonly TaskCardTask[]): string | undefined {
+  if (tasks.some((task) => task.kind !== "agent" || task.name === AGENT_TOOL_NAME)) {
+    return undefined;
+  }
+  const names = [...new Set(tasks.map((task) => task.name))];
+  if (names.length === 0 || names.length > MAX_NAMED_AGENTS) return undefined;
+  if (names.length <= 2) return names.join(" and ");
+  return `${names.slice(0, -1).join(", ")}, and ${names.at(-1)!}`;
+}
+
+/** From the first task's start to the last one's end. */
+function turnDuration(tasks: readonly TaskCardTask[]): string | undefined {
+  const ends = tasks.flatMap((task) =>
+    task.settledAt === undefined ? [] : [Date.parse(task.settledAt)],
+  );
+  if (ends.length === 0) return undefined;
+  const start = Math.min(...tasks.map((task) => Date.parse(task.startedAt)));
+  return shownDuration(Math.max(...ends) - start);
+}
+
+function taskDuration(task: TaskCardTask): string | undefined {
+  if (task.settledAt === undefined) return undefined;
+  return shownDuration(Date.parse(task.settledAt) - Date.parse(task.startedAt));
+}
+
+function shownDuration(ms: number): string | undefined {
+  return Number.isFinite(ms) && ms >= MIN_SHOWN_DURATION_MS ? formatDuration(ms) : undefined;
 }
 
 /** A task stopped before it finished for any reason but the model's own `task_cancel`. */
@@ -147,11 +199,17 @@ function slackStatus(task: TaskCardTask): SlackTaskStatus {
 }
 
 function outputLine(task: TaskCardTask): string | undefined {
+  const took = taskDuration(task);
   switch (task.status) {
-    case "completed":
-      return task.summary;
-    case "failed":
-      return task.summary === undefined ? "Failed" : `Failed: ${task.summary}`;
+    case "completed": {
+      if (took === undefined) return task.summary;
+      const done = `Done in ${took}`;
+      return task.summary === undefined ? done : `${done}: ${task.summary}`;
+    }
+    case "failed": {
+      const failed = took === undefined ? "Failed" : `Failed after ${took}`;
+      return task.summary === undefined ? failed : `${failed}: ${task.summary}`;
+    }
     case "cancelled":
       return stoppedLine(task.cancelReason);
     default:
@@ -213,6 +271,10 @@ function slackTaskId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(-200);
 }
 
+function slackBlockId(turnId: string): string {
+  return `eve_task_card_${slackTaskId(turnId)}`;
+}
+
 /** A turn's tracked calls, and the card eve last wrote for it. */
 export interface SlackTaskCardState {
   readonly turn: TaskCardTurn;
@@ -256,6 +318,7 @@ export function withTaskCards(
     const handler = events[type] as TrackedHandler | undefined;
     wrapped[type] = async (data, channel, ctx) => {
       const event = { data, type } as UnstampedMessageStreamEvent;
+      if (event.type === "task.started") await closeSettledCard(channel, event.data, taskCard);
       const changed = trackTaskCardEvent(
         trackedTurns(channel.state),
         event,
@@ -271,6 +334,32 @@ export function withTaskCards(
     };
   }
   return { ...events, ...wrapped } as SlackChannelInternalEvents;
+}
+
+/**
+ * Writes a turn's card one last time as finished when the turn starts a task
+ * after all of the card's tasks settled, then leaves the turn's working calls
+ * to post a new card. Without this, a turn the caller kept talking to would
+ * add its next tasks to a card far up the thread.
+ */
+async function closeSettledCard(
+  channel: SlackEventContext,
+  data: { readonly callId: string; readonly turnId: string },
+  taskCard: (view: TaskCardView) => SlackTaskCard | null,
+): Promise<void> {
+  const current = channel.state.taskCards?.[data.turnId];
+  const split = current && closeSettledTasks(current.turn, data.callId);
+  if (split === undefined) return;
+  channel.state.taskCards = {
+    ...channel.state.taskCards,
+    [data.turnId]: { ...current, turn: split.closed },
+  };
+  await writeTaskCard(channel, data.turnId, taskCard);
+  // No `ts`: the working calls post a new card, even if the closing write failed.
+  channel.state.taskCards = {
+    ...channel.state.taskCards,
+    [data.turnId]: { turn: split.open },
+  };
 }
 
 function trackedTurns(state: SlackChannelState): Readonly<Record<string, TaskCardTurn>> {

@@ -75,6 +75,7 @@ import {
 } from "#tracing/agent-span-contract.js";
 import { withErrorContent } from "#tracing/error-content-context.js";
 import { withAgentToolContentPolicy } from "#tracing/agent-tool-span-context.js";
+import { withOperationConversation } from "#tracing/conversation-context.js";
 import { recordAgentSpanError as recordError } from "#tracing/agent-span-error.js";
 import { resolveInstrumentationEnvironment } from "#internal/application/dev-environment.js";
 import type { ConversationEnvironment } from "#shared/conversation-context.js";
@@ -306,7 +307,12 @@ export function createAgentOtelInstrumentation(
         const session = await input.stateStore.getSession(event.sessionId);
         if (isSampledTrace(turn.context)) {
           const agentName = session?.agentName ?? turn.subagentName;
-          const parentContext = withChannelAudience(ROOT_CONTEXT, session?.channelAudience);
+          const parentContext = withChannelAudience(
+            turn.caller === undefined || turn.caller.isRemote === true
+              ? ROOT_CONTEXT
+              : contextFromSpanContext(turn.caller),
+            session?.channelAudience,
+          );
           const startSpan = () =>
             input.tracer.startSpan(
               agentInvocationSpanName(agentName),
@@ -321,7 +327,7 @@ export function createAgentOtelInstrumentation(
                 }),
                 kind: SpanKind.INTERNAL,
                 links: agentActivationLinks(turn),
-                root: true,
+                root: turn.caller === undefined || turn.caller.isRemote === true,
                 startTime: turn.startTimeMs,
               },
               parentContext,
@@ -600,7 +606,10 @@ export function createAgentOtelInstrumentation(
         operation.type === "tool.call"
           ? withAgentToolContentPolicy(withErrorPolicy, toolContentPolicy)
           : withErrorPolicy;
-      return context.with(markAgentTraceContext(operationContext), execute);
+      return context.with(
+        markAgentTraceContext(withOperationConversation(operationContext, operation.scope)),
+        execute,
+      );
     },
   };
 
@@ -624,11 +633,8 @@ export function createAgentOtelInstrumentation(
 
 function agentActivationLinks(turn: AgentTurnTraceState): Link[] | undefined {
   const links: Link[] = [];
-  if (turn.caller !== undefined) {
-    links.push({
-      context: turn.caller,
-      attributes: { "eve.link.type": "agent.dispatch" },
-    });
+  if (turn.caller?.isRemote === true) {
+    links.push({ context: turn.caller, attributes: { "eve.link.type": "agent.dispatch" } });
   }
   if (turn.channelDelivery?.requestTraceContext !== undefined) {
     links.push({

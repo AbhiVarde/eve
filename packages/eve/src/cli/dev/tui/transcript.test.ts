@@ -305,7 +305,9 @@ describe("ConversationTranscript", () => {
       taskStarted("call_1", "summarize"),
       toolResult("call_1", "summarize"),
       toolCall("wait_1", "task_wait"),
-      event(createTurnWaitingEvent({ usage: TEST_USAGE, sequence: 3, turnId: "turn_1" })),
+      event(
+        createTurnWaitingEvent({ on: "tasks", usage: TEST_USAGE, sequence: 3, turnId: "turn_1" }),
+      ),
     ]);
     const transcript = new ConversationTranscript();
     const working = view(state, true);

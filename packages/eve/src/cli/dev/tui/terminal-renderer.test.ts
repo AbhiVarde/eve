@@ -3836,7 +3836,9 @@ describe("TerminalRenderer conversation", () => {
           turnId: "turn_1",
         }),
       ),
-      stamped(createTurnWaitingEvent({ usage: TEST_USAGE, sequence: 3, turnId: "turn_1" })),
+      stamped(
+        createTurnWaitingEvent({ on: "tasks", usage: TEST_USAGE, sequence: 3, turnId: "turn_1" }),
+      ),
     ];
     renderer.renderConversation(conversationOf(working, { working: true }));
     const during = screen.snapshot();

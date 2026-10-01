@@ -414,7 +414,23 @@ export const defaultEvents: SlackChannelInternalEvents = {
     if (working.length > 0) await channel.thread.startTyping(waitingOnTasks(working));
   },
 
+  // The turn's next model step reads the results, so `step.started` can say so.
+  async "task.settled"(event, channel, _ctx) {
+    if (event.cancel === undefined) channel.state.pendingTaskResultsTurnId = event.turnId;
+  },
+
+  // Each later step replaces the status left by the previous one, such as a
+  // finished tool's label or `Waiting on 3 tasks...`, which would otherwise
+  // linger until the model streams something. `turn.started` covers step 0.
+  async "step.started"(event, channel, _ctx) {
+    if (event.stepIndex === 0) return;
+    const reviewing = channel.state.pendingTaskResultsTurnId === event.turnId;
+    channel.state.pendingTaskResultsTurnId = null;
+    await channel.thread.startTyping(reviewing ? "Reviewing results..." : "Thinking...");
+  },
+
   async "turn.started"(_event, channel, _ctx) {
+    channel.state.pendingTaskResultsTurnId = null;
     channel.state.pendingToolCallMessage = null;
     channel.state.lastReasoningTypingAtMs = null;
     channel.state.lastReasoningTypingStatus = null;

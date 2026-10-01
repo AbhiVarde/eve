@@ -250,6 +250,12 @@ export interface SlackChannelState {
    */
   taskCards?: Record<string, SlackTaskCardState> | null;
   /**
+   * The turn with a task that settled since its last model step. The default
+   * `step.started` handler shows `Reviewing results...` for the step that reads
+   * the results.
+   */
+  pendingTaskResultsTurnId?: string | null;
+  /**
    * Principal id to Slack user id, recorded as each message or input response
    * is delivered. Default handlers use it to address the principal named on
    * `authorization.required` and approval events.

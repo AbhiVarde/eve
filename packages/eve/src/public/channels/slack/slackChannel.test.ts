@@ -762,6 +762,65 @@ describe("slackChannel() default event handlers", () => {
     ]);
   });
 
+  it("replaces the previous step's status when the model starts another step", async () => {
+    const adapter = withState(
+      getAdapter(slackChannel({ credentials: { botToken: "xoxb-test" } })),
+      THREAD_STATE,
+    );
+    const ctx = buildAdapterContext(adapter, stubAccessor());
+    const stepStarted = (stepIndex: number) =>
+      makeEvent("step.started", { modelId: "test", sequence: 1, stepIndex, turnId: "t1" });
+    const taskStarted = (callId: string, name: string) =>
+      makeEvent("task.started", { callId, kind: "agent", name, taskId: `${name}-1`, turnId: "t1" });
+
+    await callEvent(adapter, stepStarted(0), ctx);
+    await callEvent(adapter, taskStarted("c1", "researcher"), ctx);
+    await callEvent(adapter, taskStarted("c2", "reviewer"), ctx);
+    await callEvent(adapter, makeEvent("turn.waiting", { sequence: 1, turnId: "t1" }), ctx);
+    await callEvent(
+      adapter,
+      makeEvent("task.settled", {
+        callId: "c1",
+        status: "completed",
+        taskId: "researcher-1",
+        turnId: "t1",
+      }),
+      ctx,
+    );
+    await callEvent(adapter, stepStarted(1), ctx);
+    await callEvent(adapter, makeEvent("turn.waiting", { sequence: 1, turnId: "t1" }), ctx);
+    await callEvent(
+      adapter,
+      makeEvent("actions.requested", {
+        actions: [{ callId: "call_1", input: {}, kind: "tool-call", toolName: "search" }],
+        sequence: 1,
+        stepIndex: 2,
+        turnId: "t1",
+      }),
+      ctx,
+    );
+    await callEvent(
+      adapter,
+      makeEvent("task.settled", {
+        callId: "c2",
+        cancel: { reason: "task_cancel" },
+        status: "cancelled",
+        taskId: "reviewer-1",
+        turnId: "t1",
+      }),
+      ctx,
+    );
+    await callEvent(adapter, stepStarted(3), ctx);
+
+    expect(slackStatuses(fetchMock)).toEqual([
+      "Waiting on 2 tasks...",
+      "Reviewing results...",
+      "Waiting on reviewer...",
+      "Search",
+      "Thinking...",
+    ]);
+  });
+
   it("forgets a failed turn's tasks even when a renderer replaces its failure reply", async () => {
     const adapter = withState(
       getAdapter(
@@ -871,7 +930,7 @@ describe("slackChannel() default event handlers", () => {
     expect(ctx.state.pendingToolCallMessage).toBeNull();
   });
 
-  it("shows the first call's start label in the typing status, without the model's own task calls", async () => {
+  it("shows the first call's start label in the typing status, or its display title, without the model's own task calls", async () => {
     const adapter = withState(
       getAdapter(slackChannel({ credentials: { botToken: "xoxb-test" } })),
       THREAD_STATE,
@@ -894,9 +953,12 @@ describe("slackChannel() default event handlers", () => {
     await callEvent(adapter, requested(["task_wait"]), ctx);
     expect(fetchMock).not.toHaveBeenCalled();
 
-    await callEvent(adapter, requested(["task_cancel", "search", "deploy"]), ctx);
-    await callEvent(adapter, requested(["task_cancel", "deploy"]), ctx);
-    expect(slackStatuses(fetchMock)).toEqual(["Search checkout incidents +1 more", "deploy"]);
+    await callEvent(adapter, requested(["task_cancel", "search", "ops__deploy_preview"]), ctx);
+    await callEvent(adapter, requested(["task_cancel", "ops__deploy_preview"]), ctx);
+    expect(slackStatuses(fetchMock)).toEqual([
+      "Search checkout incidents +1 more",
+      "Deploy preview",
+    ]);
   });
 
   it("message.completed clears typing without posting for empty delivery", async () => {

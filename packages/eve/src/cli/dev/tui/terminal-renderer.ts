@@ -1127,6 +1127,8 @@ export class TerminalRenderer implements AgentTUIRenderer {
         this.#theme,
         width,
         this.#inputContextLabel(request.context),
+        false,
+        "left",
       );
     this.#paint();
 
@@ -1233,6 +1235,8 @@ export class TerminalRenderer implements AgentTUIRenderer {
         this.#theme,
         width,
         this.#inputContextLabel(question.context),
+        false,
+        "left",
       );
 
     const textPanel = (width: number) => {
@@ -1256,6 +1260,8 @@ export class TerminalRenderer implements AgentTUIRenderer {
         this.#theme,
         width,
         this.#inputContextLabel(question.context),
+        false,
+        "left",
       );
     };
 
@@ -3145,17 +3151,20 @@ export class TerminalRenderer implements AgentTUIRenderer {
     this.#taskEndGraceTimer = undefined;
   }
 
-  #taskPanelRows(width: number): string[] {
-    const working = this.#transcript.tasks;
-    if (working.length === 0) return [];
-    return renderTaskPanelRows(working, {
+  #taskPanelRows(width: number, maxRows = Math.max(8, Math.floor(this.#height() / 2))): string[] {
+    const tasks = this.#transcript.tasks;
+    if (tasks.length === 0) return [];
+    const working = this.#view?.working === true && this.#flowlessStatus === undefined;
+    const now = Date.now();
+    const activity =
+      working && this.#view !== undefined ? turnActivity(this.#view, tasks) : "Working";
+    return renderTaskPanelRows(tasks, {
       width,
       theme: this.#theme,
-      nowMs: Date.now(),
-      pulse: this.#progressPulseGlyph(
-        this.#activityPulseStartedAtMs,
-        this.#theme.unicode ? PROGRESS_PULSE_GLYPH : PROGRESS_PULSE_ASCII_GLYPH,
-      ),
+      nowMs: now,
+      maxRows,
+      activity: activity.startsWith("Waiting for ") ? "Waiting" : activity,
+      turnElapsedMs: working ? Math.max(0, now - (this.#turnClock.startedAtMs ?? now)) : undefined,
     });
   }
 
@@ -3539,11 +3548,12 @@ export class TerminalRenderer implements AgentTUIRenderer {
       return [...drawer.rows, ...drawer.controls];
     }
 
-    // The HITL drawer opens one row below the transcript, then owns the
-    // footer down to its controls with no status line beneath it.
+    // The request keeps priority; activity uses the remaining height and shares its top rule.
     if (this.#hitlDrawer !== undefined) {
       const drawer = this.#hitlDrawer(width);
-      return [...rows, ...drawer.rows, ...drawer.controls];
+      const available = this.#height() - drawer.rows.length - drawer.controls.length - 1;
+      const activity = available >= 4 ? this.#taskPanelRows(width, available + 1) : [];
+      return [...activity.slice(0, -1), ...drawer.rows, ...drawer.controls];
     }
 
     const flow = this.#setupFlow;
@@ -3628,10 +3638,10 @@ export class TerminalRenderer implements AgentTUIRenderer {
 
     // The task panel is the one region that redraws in place while tasks
     // work, so it sits in the footer rather than the transcript.
+    const working = this.#view?.working === true && this.#flowlessStatus === undefined;
     const taskRows = this.#taskPanelRows(width);
     if (taskRows.length > 0) {
       rows.push(...taskRows);
-      if (this.#inputActive) rows.push("");
     }
 
     // Messages typed while the agent starts wait in a panel directly above
@@ -3645,9 +3655,8 @@ export class TerminalRenderer implements AgentTUIRenderer {
 
     // While work runs, the one live turn bar rides above the composer. The
     // `Done in … (↑ … ↓ …)` coda is this bar's settled form.
-    const working = this.#view?.working === true && this.#flowlessStatus === undefined;
     if (working) {
-      rows.push(this.#streamingTurnBar(width));
+      if (taskRows.length === 0) rows.push(this.#streamingTurnBar(width));
       if (this.#cancelRequested) {
         rows.push(
           clip(
@@ -3656,7 +3665,7 @@ export class TerminalRenderer implements AgentTUIRenderer {
           ),
         );
       }
-      rows.push("");
+      if (taskRows.length === 0 || this.#cancelRequested) rows.push("");
     }
 
     if (this.#inputActive) {
@@ -3720,7 +3729,7 @@ export class TerminalRenderer implements AgentTUIRenderer {
     // The composer is closed while a command or other surface runs. A kept
     // draft stays visible so keys typed in this gap have somewhere to land.
     if (working || this.#draft.text.length > 0) {
-      this.#pushDraftPrompt(rows, width, { inert: working });
+      this.#pushDraftPrompt(rows, width, { inert: working, adjacent: taskRows.length > 0 });
       this.#pushStatusLine(rows, width);
       return rows;
     }
@@ -3767,8 +3776,12 @@ export class TerminalRenderer implements AgentTUIRenderer {
   }
 
   /** The kept draft as a prompt row, inert while work runs without the composer. */
-  #pushDraftPrompt(rows: string[], width: number, options: { inert: boolean }): void {
-    if (rows.at(-1) !== "") rows.push("");
+  #pushDraftPrompt(
+    rows: string[],
+    width: number,
+    options: { inert: boolean; adjacent?: boolean },
+  ): void {
+    if (!options.adjacent && rows.at(-1) !== "") rows.push("");
     const prompt: Parameters<typeof promptInputRows>[0] = {
       text: this.#draft.text,
       cursor: this.#draft.cursor,
